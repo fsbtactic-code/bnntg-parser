@@ -169,19 +169,27 @@ async function processChannels(client, saveDiscoveredChannel) {
 
             let channelMemes = [];
 
-            // Получаем кол-во подписчиков через getEntity — даёт реальный participantsCount
-            // (history.chats возвращает 0 для каналов вместо null — ненадёжно)
-            try {
-                const entity = await client.getEntity(channel);
-                const srcSubs = (entity && entity.participantsCount) ? entity.participantsCount : null;
-                if      (srcSubs === null)  stats.unknown++;
-                else if (srcSubs < 1000)   stats.lt1k++;
-                else if (srcSubs < 5000)   stats.lt5k++;
-                else if (srcSubs < 10000)  stats.lt10k++;
-                else if (srcSubs < 20000)  stats.lt20k++;
-                else                       stats.gt20k++;
-            } catch(e) {
-                stats.unknown++;
+            // Сохраняем подписчиков source-канала в кэш (если history.chats содержит реальные данные)
+            // гет не вызываем getEntity — он flood-опасен
+            {
+                const chName = channel.toLowerCase().replace('@', '');
+                const srcChat = history.chats && history.chats.find(c =>
+                    (c.username || '').toLowerCase() === chName
+                );
+                const pc = srcChat ? srcChat.participantsCount : 0;
+                // Сохраняем в кэш если получили реальные данные
+                if (pc > 0 && !subsCache[chName]) {
+                    subsCache[chName] = { subs: pc };
+                }
+                // Берём из кэша (может быть заполнен из прошлых проходов)
+                const cached = subsCache[chName];
+                const subs = cached ? (typeof cached === 'number' ? cached : (cached.subs || 0)) : pc;
+                if      (subs > 0 && subs < 1000)  stats.lt1k++;
+                else if (subs >= 1000 && subs < 5000)  stats.lt5k++;
+                else if (subs >= 5000 && subs < 10000) stats.lt10k++;
+                else if (subs >= 10000 && subs < 20000) stats.lt20k++;
+                else if (subs >= 20000)                 stats.gt20k++;
+                else                                    stats.unknown++; // 0 = нет данных
             }
 
             for (let msg of history.messages) {
