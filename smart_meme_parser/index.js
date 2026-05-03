@@ -13,7 +13,7 @@ const { StringSession } = require('telegram/sessions');
 const input = require('input');
 const https = require('https');
 const { calculateVirality, updateMemory, loadMemory, saveMemory, adaptiveThreshold } = require('./virality');
-const { isDuplicate, saveToDatabase } = require('./dedup');
+const { isDuplicate, saveToDatabase, getTopDuplicates } = require('./dedup');
 
 // ─── Bot API helper ─────────────────────────────────────────────────────────
 const BOT_TOKEN  = process.env.BOT_TOKEN;
@@ -137,13 +137,14 @@ async function processChannels(client, saveDiscoveredChannel) {
 
     // ── Статистика прохода ──────────────────────────────────────────────────
     const stats = {
-        totalPosts: 0,
+        totalPostsViewed: 0,  // все просмотренные посты (до фильтра)
+        totalPosts: 0,        // прошли фильтр (react≥3, views≥100)
         viral: 0,
         dupFiltered: 0,
         forwarded: 0,
-        // Размеры каналов (по кол-ву подписчиков source-канала)
         lt1k: 0, lt5k: 0, lt10k: 0, lt20k: 0, gt20k: 0, unknown: 0
     };
+    const dupHits = []; // трекаем самые копируемые мемы
 
     // Загружаем кэш подписчиков один раз до цикла
     const cachePath = './channel_cache.json';
@@ -168,6 +169,7 @@ async function processChannels(client, saveDiscoveredChannel) {
             );
 
             let channelMemes = [];
+            let srcPeer = channel; // будет заполнен из history.chats entity (без ResolveUsername)
 
             // Сохраняем подписчиков source-канала в кэш (если history.chats содержит реальные данные)
             // гет не вызываем getEntity — он flood-опасен
@@ -176,20 +178,28 @@ async function processChannels(client, saveDiscoveredChannel) {
                 const srcChat = history.chats && history.chats.find(c =>
                     (c.username || '').toLowerCase() === chName
                 );
-                const pc = srcChat ? srcChat.participantsCount : 0;
-                // Сохраняем в кэш если получили реальные данные
-                if (pc > 0 && !subsCache[chName]) {
-                    subsCache[chName] = { subs: pc };
+                // srcPeer — объект entity из gramjs (не вызывает ResolveUsername)
+                srcPeer = srcChat || channel;
+
+                // Подписчики: из history.chats (бесплатно), затем из кэша c rawSubs
+                function parseRawSubs(raw) {
+                    if (!raw) return 0;
+                    const s = String(raw).replace(/\s/g,'').toUpperCase();
+                    if (s.endsWith('M')) return Math.round(parseFloat(s) * 1_000_000);
+                    if (s.endsWith('K')) return Math.round(parseFloat(s) * 1_000);
+                    return parseInt(s) || 0;
                 }
-                // Берём из кэша (может быть заполнен из прошлых проходов)
+                const pc = srcChat && srcChat.participantsCount > 0 ? srcChat.participantsCount : 0;
+                if (pc > 0 && !subsCache[chName]) subsCache[chName] = { subs: pc };
                 const cached = subsCache[chName];
-                const subs = cached ? (typeof cached === 'number' ? cached : (cached.subs || 0)) : pc;
-                if      (subs > 0 && subs < 1000)  stats.lt1k++;
+                const subs = pc > 0 ? pc
+                    : (cached ? (typeof cached === 'number' ? cached : (cached.subs > 0 ? cached.subs : parseRawSubs(cached.rawSubs))) : 0);
+                if      (subs > 0 && subs < 1000)   stats.lt1k++;
                 else if (subs >= 1000 && subs < 5000)  stats.lt5k++;
                 else if (subs >= 5000 && subs < 10000) stats.lt10k++;
                 else if (subs >= 10000 && subs < 20000) stats.lt20k++;
                 else if (subs >= 20000)                 stats.gt20k++;
-                else                                    stats.unknown++; // 0 = нет данных
+                else                                    stats.unknown++;
             }
 
             for (let msg of history.messages) {
@@ -265,6 +275,8 @@ async function processChannels(client, saveDiscoveredChannel) {
                 }
                 const replies = msg.replies ? msg.replies.replies : 0;
 
+                stats.totalPostsViewed++; // считаем все посты до любой фильтрации
+
                 // 1. Сначала СКОРИМ с текущей памятью (до обновления)
                 // Минимальные пороги: ≥3 реакций и ≥100 просмотров (защита от ложных аномалий)
                 if (msg.date * 1000 >= timeLimitMs && reactions >= 3 && views >= 100) {
@@ -283,6 +295,7 @@ async function processChannels(client, saveDiscoveredChannel) {
                         const scored = calculateVirality(views, reactions, replies, msg.date * 1000, channelMem, subsRaw, reactionResults);
                         channelMemes.push({
                             channel,
+                            peer: srcPeer, // entity object из gramjs — не вызывает ResolveUsername
                             id: msg.id,
                             date: msg.date,
                             views,
@@ -354,6 +367,23 @@ async function processChannels(client, saveDiscoveredChannel) {
     console.log(`✅ Квалифицировано (RVI≥${MIN_RVI}): ${qualified.length} из ${allMemes.length}`);
     allMemes.splice(0, allMemes.length, ...qualified);
 
+    // Один раз резолвим destination чтобы не вызывать ResolveUsername на каждом форварде
+    let destPeer = currentConfig.destinationChannel;
+    try {
+        destPeer = await client.getInputEntity(currentConfig.destinationChannel);
+        console.log(`✅ Dest resolved: ${currentConfig.destinationChannel}`);
+    } catch(e) {
+        const numId = process.env.BOT_CHANNEL_ID;
+        if (numId) {
+            try {
+                destPeer = await client.getInputEntity(BigInt(numId.replace('-100','')));
+                console.log(`✅ Dest via numeric ID: ${numId}`);
+            } catch(e2) {
+                console.warn(`⚠️ Dest resolve failed (flood?), using string. ${e.message}`);
+            }
+        }
+    }
+
     // Обработка Анти-Баяном и Пересылка
     let forwardedCount = 0;
     
@@ -368,6 +398,18 @@ async function processChannels(client, saveDiscoveredChannel) {
             if (isDupe) {
                 console.log(`♻️ БАЯН! Пропускаем: ${meme.channel}/${meme.id} (уже было)`);
                 stats.dupFiltered++;
+                // Трекаем копируемые мемы — сохраняем ВСЕ каналы где встречалась картинка
+                if (isDupe.channelId && isDupe.messageId) {
+                    const key = `${isDupe.channelId}:${isDupe.messageId}`;
+                    let entry = dupHits.find(d => d.key === key);
+                    if (!entry) {
+                        entry = { key, channelId: isDupe.channelId, messageId: isDupe.messageId, hitCount: isDupe.hitCount || 1, seenIn: [] };
+                        dupHits.push(entry);
+                    }
+                    // Добавляем текущий канал-дубликат в список
+                    entry.seenIn.push({ channel: meme.channel, msgId: meme.id });
+                    entry.hitCount = isDupe.hitCount || entry.seenIn.length;
+                }
                 continue;
             }
 
@@ -375,9 +417,9 @@ async function processChannels(client, saveDiscoveredChannel) {
             
             let forwarded;
             try {
-                forwarded = await client.forwardMessages(config.destinationChannel, {
+                forwarded = await client.forwardMessages(destPeer || currentConfig.destinationChannel, {
                     messages: [meme.id],
-                    fromPeer: meme.channel
+                    fromPeer: meme.peer || meme.channel
                 });
             } catch(fwdErr) {
                 const msg = fwdErr.message || '';
@@ -482,13 +524,50 @@ async function processChannels(client, saveDiscoveredChannel) {
         ...(stats.unknown > 0 ? [`   ❓ нет данных: ${stats.unknown}`] : []),
         ``,
         `🔍 <b>Посты:</b>`,
-        `   Найдено (react≥3, views≥100): ${stats.totalPosts}`,
+        `   📖 Просмотрено всего: ${stats.totalPostsViewed}`,
+        `   ✔️ С реакциями (react≥3, views≥100): ${stats.totalPosts}`,
         `   🔥 Вирусных (RVI≥1.5): ${stats.viral}`,
         `   ♻️ Баяны: ${stats.dupFiltered}`,
     ].join('\n');
 
     await botSendMessage(BOT_CHAT || currentConfig.destinationChannel, report)
         .catch(e => console.error('Report send error:', e.message));
+
+    // Отправляем топ-2 самых копируемых мемов если есть баяны
+    if (stats.dupFiltered > 0) {
+        try {
+            const topDupes = getTopDuplicates(2);
+            if (topDupes.length > 0) {
+                // Заголовок перед картинками
+                await botSendMessage(BOT_CHAT || currentConfig.destinationChannel,
+                    🏆 <b>Самые копируемые мемы прохода:</b>
+                ).catch(() => {});
+
+                for (const dupe of topDupes) {
+                    try {
+                        // Пересылаем оригинальный мем в бот-канал
+                        await client.forwardMessages(
+                            destPeer || currentConfig.destinationChannel,
+                            { messages: [parseInt(dupe.messageId)], fromPeer: dupe.channelId }
+                        );
+                        // Подпись: Самая копируемая картинка + список каналов
+                        const seenLinks = (dupe.seenIn && dupe.seenIn.length > 0)
+                            ? dupe.seenIn.map(x => '  • <a href="https://t.me/' + x.channel + '/' + x.msgId + '">' + x.channel + '</a>').join('\n')
+                            : '  • @' + dupe.channelId;
+                        await botSendMessage(
+                            BOT_CHAT || currentConfig.destinationChannel,
+                            '🖼 <b>Самая копируемая картинка</b> — встречалась в каналах:\n' + seenLinks
+                        ).catch(() => {});
+                        await new Promise(r => setTimeout(r, 1000));
+                    } catch(e) {
+                        console.log('⚠️ Ошибка пересылки топ-баяна:', e.message);
+                    }
+                }
+            }
+        } catch(e) {
+            console.error('⚠️ top dupes error:', e.message);
+        }
+    }
 
 }
 

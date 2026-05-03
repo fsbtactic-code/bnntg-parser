@@ -1,6 +1,7 @@
 /**
  * dedup.js — Анти-баян на базе pHash.
  * Хранит хэши в JSON-файле вместо SQLite для совместимости на любой платформе.
+ * Добавлен hitCount — счётчик сколько раз мем найден как баян.
  */
 
 const Jimp = require('jimp');
@@ -54,24 +55,29 @@ function hammingDistance(h1, h2) {
  * Проверяет, является ли картинка дубликатом (баяном).
  * @param {Buffer} imageBuffer
  * @param {number} threshold  — допустимая разница (default 5, т.е. схожесть >92%)
- * @returns {boolean}
+ * @returns {object|false} — matched entry (с channel/messageId/hitCount) или false
  */
 async function isDuplicate(imageBuffer, threshold = 5) {
     try {
-        // Для видео (mp4) Jimp не работает — пропускаем pHash, опираемся на ID-дедуп (channelId+messageId)
+        // Для видео (mp4) Jimp не работает — пропускаем pHash, опираемся на ID-дедуп
         const isVideo = imageBuffer.length > 4 &&
             (imageBuffer[0] === 0 && imageBuffer[4] === 0x66 && imageBuffer[5] === 0x74 && imageBuffer[6] === 0x79 && imageBuffer[7] === 0x70) ||
-            (imageBuffer.slice(4,8).toString('ascii') === 'ftyp'); // mp4 signature
-        if (isVideo) return false; // видео проверяем только по ID (см. saveToDatabase)
+            (imageBuffer.slice(4,8).toString('ascii') === 'ftyp');
+        if (isVideo) return false;
 
         const newHash = await getPHash(imageBuffer);
         for (const row of hashCache) {
-            if (row.hash && hammingDistance(newHash, row.hash) <= threshold) return true;
+            if (row.hash && hammingDistance(newHash, row.hash) <= threshold) {
+                // Инкрементируем счётчик попаданий и сохраняем
+                row.hitCount = (row.hitCount || 0) + 1;
+                saveHashes(hashCache);
+                return row; // возвращаем matched entry с channel/messageId/hitCount
+            }
         }
         return false;
     } catch (e) {
         console.error('❌ pHash error:', e.message);
-        return false; // При ошибке не блокируем
+        return false;
     }
 }
 
@@ -80,15 +86,19 @@ async function isDuplicate(imageBuffer, threshold = 5) {
  */
 async function saveToDatabase(imageBuffer, messageId, channelId) {
     try {
-        // Для видео используем ID-идентификатор вместо pHash
         let hash;
         try {
             hash = await getPHash(imageBuffer);
         } catch (e) {
-            // видео или неподдерживаемый формат — используем ID
-            hash = null;
+            hash = null; // видео — используем ID-идентификатор
         }
-        const entry = { hash, messageId: String(messageId), channelId: String(channelId), ts: Date.now() };
+        const entry = {
+            hash,
+            messageId: String(messageId),
+            channelId: String(channelId),
+            hitCount: 0,
+            ts: Date.now()
+        };
         hashCache.push(entry);
         if (hashCache.length > 50000) hashCache = hashCache.slice(-50000);
         saveHashes(hashCache);
@@ -97,4 +107,16 @@ async function saveToDatabase(imageBuffer, messageId, channelId) {
     }
 }
 
-module.exports = { isDuplicate, saveToDatabase };
+/**
+ * Возвращает топ N самых копируемых мемов (по hitCount).
+ * @param {number} topN
+ * @returns {Array} — отсортированный массив записей
+ */
+function getTopDuplicates(topN = 2) {
+    return [...hashCache]
+        .filter(e => e.hitCount > 0 && e.channelId && e.messageId)
+        .sort((a, b) => (b.hitCount || 0) - (a.hitCount || 0))
+        .slice(0, topN);
+}
+
+module.exports = { isDuplicate, saveToDatabase, getTopDuplicates };
