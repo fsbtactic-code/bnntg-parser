@@ -193,7 +193,9 @@ async function processChannels(client, saveDiscoveredChannel) {
                         if (!entityCache[key]) entityCache[key] = { id: chat.id.toString(), accessHash: chat.accessHash.toString() };
                     }
                 }
-            } // будет заполнен из history.chats entity (без ResolveUsername)
+            }
+            // Сохраняем entity_cache СРАЗУ после каждого GetHistory (не ждём конца прогона)
+            saveEntityCache();
 
             // Сохраняем подписчиков source-канала в кэш (если history.chats содержит реальные данные)
             // гет не вызываем getEntity — он flood-опасен
@@ -446,7 +448,27 @@ async function processChannels(client, saveDiscoveredChannel) {
         }
     }
 
+    // ── Проверяем flood ban state ────────────────────────────────────────────────
+    const floodStatePath = './flood_state.json';
+    let floodBanActive = false;
+    if (fs.existsSync(floodStatePath)) {
+        try {
+            const floodData = JSON.parse(fs.readFileSync(floodStatePath, 'utf8'));
+            const elapsed = (Date.now() - floodData.bannedAt) / 1000;
+            const remaining = floodData.waitSec - elapsed;
+            if (remaining > 0) {
+                floodBanActive = true;
+                console.log('🚫 Flood ban ещё активен. Осталось: ' + Math.round(remaining/60) + ' мин. Форварды пропущены.');
+                saveEntityCache();
+            } else {
+                fs.unlinkSync(floodStatePath);
+                console.log('✅ Flood ban истёк! Форварды возобновлены.');
+            }
+        } catch(_) {}
+    }
+
     // ── Forwarding: top-15 из всех + top-5 из малых (<2000 подп.) без дублей ───
+    if (!floodBanActive) {
     const MAX_MAIN = config.maxMemesToForward || 15;
     const MAX_SMALL = config.maxSmallChannelMemes || 5;
 
@@ -518,6 +540,14 @@ async function processChannels(client, saveDiscoveredChannel) {
                     } catch(e) { console.log('   cfg update error:', e.message); }
                 } else if (msg.includes('CHANNEL_PRIVATE')) {
                     console.log(`🚫 Приватный канал @${meme.channel} — пропускаем`);
+                } else if (msg.includes('ResolveUsername') || msg.includes('wait of') || msg.includes('FLOOD_WAIT')) {
+                    // Flood ban на ResolveUsername или любой флуд — сохраняем и прекращаем
+                    const waitMatch = msg.match(/(\d{4,}) seconds/) || msg.match(/FLOOD_WAIT_(\d+)/);
+                    const waitSec = waitMatch ? parseInt(waitMatch[1]) : 3600;
+                    const floodState = { bannedAt: Date.now(), waitSec };
+                    try { fs.writeFileSync(floodStatePath, JSON.stringify(floodState)); } catch(_) {}
+                    console.log(`🚫 FLOOD BAN! wait=${Math.round(waitSec/3600)}ч. Форварды прерваны. Запись в flood_state.json`);
+                    break; // прекращаем весь forwarding loop
                 } else {
                     console.log(`❌ Ошибка пересылки @${meme.channel}:`, msg);
                 }
@@ -571,8 +601,11 @@ async function processChannels(client, saveDiscoveredChannel) {
         }
     }
 
+    } // end if (!floodBanActive)
+
+    saveEntityCache(); // Сохраняем все накопленные entities
     const nextIn = Math.round((30 * 60 * 1000 - (Date.now() % (30*60*1000))) / 60000);
-    console.log(`\n✅ Итерация завершена. Переслано: ${forwardedCount} мемов.`);
+    console.log(`\n✅ Итерация завершена. Переслано: ${floodBanActive ? 0 : forwardedCount} мемов.`);
     console.log(`⏰ Следующий прогон через ~30 мин (в ${new Date(Date.now() + 30*60*1000).toLocaleTimeString('ru')})`);
 
     // ── Итоговый отчёт в канал ───────────────────────────────────────────────
@@ -618,7 +651,7 @@ async function processChannels(client, saveDiscoveredChannel) {
             if (topDupes.length > 0) {
                 // Заголовок перед картинками
                 await botSendMessage(BOT_CHAT || currentConfig.destinationChannel,
-                    🏆 <b>Самые копируемые мемы прохода:</b>
+                    `🏆 <b>Самые копируемые мемы прохода:</b>`
                 ).catch(() => {});
 
                 for (const dupe of topDupes) {
