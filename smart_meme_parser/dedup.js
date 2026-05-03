@@ -119,4 +119,12 @@ function getTopDuplicates(topN = 2) {
         .slice(0, topN);
 }
 
-module.exports = { isDuplicate, saveToDatabase, getTopDuplicates };
+/**
+ * Проверяет, был ли пост уже переслан (по channel+messageId).
+ * Быстрая проверка без pHash — до downloadMedia.
+ */
+function isAlreadyForwarded(channelId, messageId) {
+    return hashCache.some(h => h.channelId === String(channelId) && h.messageId === String(messageId));
+}
+
+module.exports = { isDuplicate, saveToDatabase, getTopDuplicates, isAlreadyForwarded };

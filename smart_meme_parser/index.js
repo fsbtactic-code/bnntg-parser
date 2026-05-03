@@ -13,7 +13,7 @@ const { StringSession } = require('telegram/sessions');
 const input = require('input');
 const https = require('https');
 const { calculateVirality, updateMemory, loadMemory, saveMemory, adaptiveThreshold } = require('./virality');
-const { isDuplicate, saveToDatabase, getTopDuplicates } = require('./dedup');
+const { isDuplicate, saveToDatabase, getTopDuplicates, isAlreadyForwarded } = require('./dedup');
 
 // ─── Bot API helper ─────────────────────────────────────────────────────────
 const BOT_TOKEN  = process.env.BOT_TOKEN;
@@ -491,6 +491,13 @@ async function processChannels(client, saveDiscoveredChannel) {
         if (meme._slot === 'small' && forwardedSmall >= MAX_SMALL) continue;
 
         try {
+            // ── Быстрая дедупликация по channel+msgId (до скачивания медиа) ──
+            if (isAlreadyForwarded(meme.channel, meme.id)) {
+                console.log(`⏭ Уже пересылали: @${meme.channel}/${meme.id} — пропуск`);
+                stats.dupFiltered++;
+                continue;
+            }
+
             const buffer = await client.downloadMedia(meme.media, { thumb: 1 });
             if (!buffer) continue; 
 
