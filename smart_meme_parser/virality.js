@@ -172,17 +172,23 @@ function calculateVirality(views, reactions, comments, postDateMs, channelMem = 
 
     // ── RVI ───────────────────────────────────────────────────────────────
     let rvi;
-    if (channelMem && channelMem.post_count >= 3) {
-        // У канала достаточно истории — считаем аномалию
+    if (channelMem && channelMem.post_count >= 5) {
+        // У канала достаточно истории (≥5 постов) — считаем реальную аномалию
         const erRatio  = channelMem.avg_er       > 0 ? er       / channelMem.avg_er       : 1;
         const velRatio = channelMem.avg_velocity  > 0 ? velocity / channelMem.avg_velocity  : 1;
         // Геометрическое среднее двух аномалий (устойчивее к выбросам)
         rvi = Math.sqrt(erRatio * velRatio);
     } else {
-        // Нет истории — абсолютный VI (оригинальная формула, нормализованная)
-        const absVI = er * Math.log10(velocity + 1) * 100;
-        rvi = Math.sqrt(absVI); // берём корень чтобы шкала совпадала с RVI
+        // Нет достаточной истории — консервативный абсолютный скор
+        // er нормируем: 1% ER (0.01) при 100 views → нейтраль ≈ 1.0
+        // Формула: sqrt(er * 100) нормирует: er=0.01→1.0, er=0.04→2.0, er=0.09→3.0
+        const erNorm = Math.sqrt(Math.min(er * 100, 9)); // max 3.0 при er≥9%
+        // Velocity нормируем аналогично: log10(velocity+1) / log10(10) = log10(vel+1)
+        // velocity=1 → 0.3, velocity=9 → 0.5, velocity=99 → 0.5 (log10)
+        const velNorm = Math.min(Math.log10(velocity + 1) / Math.log10(10), 1.0);
+        rvi = Math.min(erNorm * (0.7 + 0.3 * velNorm), 3.0); // жёсткий кап 3.0 при нет истории
     }
+
 
     // ── Size ──────────────────────────────────────────────────────────────
     const subs = parseSubs(rawSubs);

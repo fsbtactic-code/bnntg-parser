@@ -233,7 +233,8 @@ async function processChannels(client, saveDiscoveredChannel) {
                 const replies = msg.replies ? msg.replies.replies : 0;
 
                 // 1. Сначала СКОРИМ с текущей памятью (до обновления)
-                if (msg.date * 1000 >= timeLimitMs && reactions > 3) {
+                // Минимальные пороги: ≥3 реакций и ≥100 просмотров (защита от ложных аномалий)
+                if (msg.date * 1000 >= timeLimitMs && reactions >= 3 && views >= 100) {
                     // Фильтруем: только фото, GIF, видео (не аудио/голос/стикеры)
                     const mediaType = msg.media?.className || '';
                     const isDocument = mediaType === 'MessageMediaDocument';
