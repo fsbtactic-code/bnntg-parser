@@ -49,6 +49,20 @@ function botSendMessage(chatId, text, replyToMsgId) {
 // Загружаем конфиг
 const config = JSON.parse(fs.readFileSync('./config.json', 'utf8'));
 
+// ── Entity Cache: channelId+accessHash → не вызываем ResolveUsername ──────────
+const ENTITY_CACHE_PATH = './entity_cache.json';
+let entityCache = {};
+try { if (fs.existsSync(ENTITY_CACHE_PATH)) entityCache = JSON.parse(fs.readFileSync(ENTITY_CACHE_PATH, 'utf8')); } catch(e) {}
+function saveEntityCache() { try { fs.writeFileSync(ENTITY_CACHE_PATH, JSON.stringify(entityCache)); } catch(e) {} }
+function getInputPeer(username, Api) {
+    const key = (username||'').toString().toLowerCase().replace('@','');
+    const e = entityCache[key];
+    if (e && e.id && e.accessHash) {
+        try { return new Api.InputPeerChannel({ channelId: BigInt(e.id), accessHash: BigInt(e.accessHash) }); } catch(_) {}
+    }
+    return username;
+}
+
 // Сессия для авторизации (сохраняется в файл)
 const sessionFile = './session.txt';
 let sessionString = '';
@@ -163,13 +177,23 @@ async function processChannels(client, saveDiscoveredChannel) {
             let channelMem = memory[channel] || null;
             const history = await client.invoke(
                 new Api.messages.GetHistory({
-                    peer: channel,
+                    peer: getInputPeer(channel, Api),
                     limit: 50,
                 })
             );
 
             let channelMemes = [];
-            let srcPeer = channel; // будет заполнен из history.chats entity (без ResolveUsername)
+            let srcPeer = channel;
+
+            // Сохраняем entity из history.chats → entity_cache
+            if (history.chats) {
+                for (const chat of history.chats) {
+                    if (chat.username && chat.id != null && chat.accessHash != null) {
+                        const key = chat.username.toLowerCase();
+                        if (!entityCache[key]) entityCache[key] = { id: chat.id.toString(), accessHash: chat.accessHash.toString() };
+                    }
+                }
+            } // будет заполнен из history.chats entity (без ResolveUsername)
 
             // Сохраняем подписчиков source-канала в кэш (если history.chats содержит реальные данные)
             // гет не вызываем getEntity — он flood-опасен
@@ -293,9 +317,13 @@ async function processChannels(client, saveDiscoveredChannel) {
                     } else {
                         const subsRaw = subsCache[channel] ? (subsCache[channel].rawSubs || subsCache[channel]) : null;
                         const scored = calculateVirality(views, reactions, replies, msg.date * 1000, channelMem, subsRaw, reactionResults);
+                        const _chName2 = channel.toLowerCase().replace('@','');
+                        const _cached2 = subsCache[_chName2];
+                        const _subs2 = !_cached2 ? 0 : (typeof _cached2 === 'number' ? _cached2 : (_cached2.subs > 0 ? _cached2.subs : parseRawSubs(_cached2.rawSubs)));
                         channelMemes.push({
                             channel,
-                            peer: srcPeer, // entity object из gramjs — не вызывает ResolveUsername
+                            peer: srcPeer,
+                            isSmall: _subs2 > 0 && _subs2 < 2000, // малый канал < 2000 подп.
                             id: msg.id,
                             date: msg.date,
                             views,
@@ -384,11 +412,27 @@ async function processChannels(client, saveDiscoveredChannel) {
         }
     }
 
-    // Обработка Анти-Баяном и Пересылка
+    // ── Forwarding: top-15 из всех + top-5 из малых (<2000 подп.) без дублей ───
+    const MAX_MAIN = config.maxMemesToForward || 15;
+    const MAX_SMALL = config.maxSmallChannelMemes || 5;
+
+    // Основная очередь: top MAX_MAIN по RVI (уже отсортированы)
+    const mainQueue = allMemes.slice(0, MAX_MAIN).map(m => ({ ...m, _slot: 'main' }));
+    const mainIds = new Set(mainQueue.map(m => m.channel + '/' + m.id));
+
+    // Малые каналы: из ОСТАТКА (не попавшего в top-15), только isSmall, top MAX_SMALL
+    const smallQueue = allMemes
+        .filter(m => m.isSmall && !mainIds.has(m.channel + '/' + m.id))
+        .slice(0, MAX_SMALL)
+        .map(m => ({ ...m, _slot: 'small' }));
+
+    const forwardQueue = [...mainQueue, ...smallQueue];
     let forwardedCount = 0;
-    
-    for (let meme of allMemes) {
-        if (forwardedCount >= config.maxMemesToForward) break;
+    let forwardedSmall = 0;
+
+    for (let meme of forwardQueue) {
+        if (meme._slot === 'main' && forwardedCount >= MAX_MAIN) continue;
+        if (meme._slot === 'small' && forwardedSmall >= MAX_SMALL) continue;
 
         try {
             const buffer = await client.downloadMedia(meme.media, { thumb: 1 });
@@ -485,7 +529,7 @@ async function processChannels(client, saveDiscoveredChannel) {
 
             // Сохраняем в базу анти-баяна
             await saveToDatabase(buffer, meme.id, meme.channel);
-            forwardedCount++;
+            if (meme._slot === 'small') forwardedSmall++; else forwardedCount++;
             stats.forwarded++;
 
         } catch (e) {
