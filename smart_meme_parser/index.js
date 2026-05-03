@@ -169,21 +169,19 @@ async function processChannels(client, saveDiscoveredChannel) {
 
             let channelMemes = [];
 
-            // Получаем кол-во подписчиков source-канала из ответа Telegram API
-            // history.chats содержит инфу о самом канале в первом элементе
-            {
-                const srcChat = history.chats && history.chats.find(c => {
-                    const uname = (c.username || '').toLowerCase();
-                    return uname === channel.toLowerCase().replace('@','');
-                });
-                const srcSubs = srcChat ? (srcChat.participantsCount || 0) : null;
-                if (srcSubs === null) {
-                    stats.unknown++;
-                } else if (srcSubs < 1000)  stats.lt1k++;
-                else if (srcSubs < 5000)  stats.lt5k++;
-                else if (srcSubs < 10000) stats.lt10k++;
-                else if (srcSubs < 20000) stats.lt20k++;
-                else                      stats.gt20k++;
+            // Получаем кол-во подписчиков через getEntity — даёт реальный participantsCount
+            // (history.chats возвращает 0 для каналов вместо null — ненадёжно)
+            try {
+                const entity = await client.getEntity(channel);
+                const srcSubs = (entity && entity.participantsCount) ? entity.participantsCount : null;
+                if      (srcSubs === null)  stats.unknown++;
+                else if (srcSubs < 1000)   stats.lt1k++;
+                else if (srcSubs < 5000)   stats.lt5k++;
+                else if (srcSubs < 10000)  stats.lt10k++;
+                else if (srcSubs < 20000)  stats.lt20k++;
+                else                       stats.gt20k++;
+            } catch(e) {
+                stats.unknown++;
             }
 
             for (let msg of history.messages) {
@@ -454,11 +452,18 @@ async function processChannels(client, saveDiscoveredChannel) {
     const mskTime = new Date(now.getTime() + 3*3600000 + now.getTimezoneOffset()*60000);
     const timeStr = mskTime.toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' });
 
+    // Каналы в очереди на фильтрацию (discovered)
+    const discoveredPath = './discovered_channels.json';
+    const discoveredCount = fs.existsSync(discoveredPath)
+        ? (() => { try { return JSON.parse(fs.readFileSync(discoveredPath, 'utf8')).length; } catch(e) { return 0; } })()
+        : 0;
+
     const report = [
         `📊 <b>Отчёт прохода ${timeStr} МСК</b>`,
         ``,
         `📡 <b>Каналов в базе:</b> ${currentConfig.targetChannels.length}`,
         `✅ Обработано: ${processedCount}  ·  ❌ Ошибок: ${skippedCount}`,
+        `📌 В очереди на фильтрацию: ${discoveredCount} каналов`,
         ``,
         `📏 <b>Размеры каналов:</b>`,
         `   до 1 000 подп.: ${stats.lt1k}`,
@@ -472,7 +477,6 @@ async function processChannels(client, saveDiscoveredChannel) {
         `   Найдено (react≥3, views≥100): ${stats.totalPosts}`,
         `   🔥 Вирусных (RVI≥1.5): ${stats.viral}`,
         `   ♻️ Баяны: ${stats.dupFiltered}`,
-        `   📤 Опубликовано: ${stats.forwarded}`,
     ].join('\n');
 
     await botSendMessage(BOT_CHAT || currentConfig.destinationChannel, report)
