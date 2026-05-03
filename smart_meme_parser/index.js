@@ -517,16 +517,35 @@ async function processChannels(client, saveDiscoveredChannel) {
             
             let forwarded;
             try {
-                forwarded = await client.forwardMessages(destPeer || currentConfig.destinationChannel, {
-                    messages: [meme.id],
-                    fromPeer: meme.peer || meme.channel
-                });
+                // Прямой MTProto invoke — gramjs НЕ вызывает ResolveUsername/getEntity
+                // fromPeer и toPeer — готовые InputPeerChannel из entity_cache
+                forwarded = await client.invoke(new Api.messages.ForwardMessages({
+                    fromPeer: meme.peer,
+                    id: [meme.id],
+                    toPeer: destPeer,
+                    randomId: [BigInt(Math.floor(Math.random() * 2**52))],
+                    silent: false,
+                    background: false,
+                    withMyScore: false,
+                    dropAuthor: false,
+                    dropMediaCaptions: false,
+                    noforwards: false,
+                }));
             } catch(fwdErr) {
                 const msg = fwdErr.message || '';
                 if (msg.includes('FLOOD_WAIT')) {
                     const secs = parseInt(msg.match(/FLOOD_WAIT_(\d+)/)?.[1] || '60');
-                    console.log(`⏳ FloodWait ${secs}s — ждём...`);
-                    await new Promise(r => setTimeout(r, secs * 1000));
+                    // Короткий flood wait (до 60с) — просто ждём
+                    if (secs < 120) {
+                        console.log(`⏳ FloodWait ${secs}s — ждём...`);
+                        await new Promise(r => setTimeout(r, secs * 1000));
+                    } else {
+                        // Долгий flood wait — сохраняем и прекращаем
+                        const floodState = { bannedAt: Date.now(), waitSec: secs };
+                        try { fs.writeFileSync(floodStatePath, JSON.stringify(floodState)); } catch(_) {}
+                        console.log(`🚫 FLOOD BAN ${secs}s! Запись в flood_state.json. Прерываем форвардинг.`);
+                        break;
+                    }
                 } else if (msg.includes('CHAT_FORWARDS_RESTRICTED')) {
                     console.log(`🔒 @${meme.channel} запрещает пересылку — добавляем в чёрный список`);
                     // Автоматически удаляем из targetChannels
@@ -554,24 +573,19 @@ async function processChannels(client, saveDiscoveredChannel) {
                 continue;
             }
 
-            if (!forwarded || !forwarded.length) {
-                console.log(`⚠️  forwardMessages вернул пустой массив для @${meme.channel}/${meme.id}`);
+            // invoke возвращает Updates объект (не массив)
+            let newMsgId = null;
+            if (forwarded && forwarded.updates) {
+                // Ищем UpdateMessageID — содержит новый msg_id в целевом канале
+                const updMsgId = forwarded.updates.find(u => u.className === 'UpdateMessageID');
+                const updNewMsg = forwarded.updates.find(u => u.className === 'UpdateNewChannelMessage');
+                newMsgId = updMsgId?.id ?? updNewMsg?.message?.id ?? null;
+            } else if (forwarded && forwarded.id) {
+                newMsgId = forwarded.id;
+            } else if (!forwarded) {
+                console.log(`⚠️  invoke вернул null для @${meme.channel}/${meme.id}`);
                 continue;
             }
-
-            // gramjs forwardMessages возвращает [[message]] — массив массивов
-            let newMsgId = null;
-            try {
-                if (Array.isArray(forwarded[0])) {
-                    // Формат [[msg, ...]]
-                    newMsgId = forwarded[0][0]?.id ?? null;
-                } else if (forwarded[0]?.id) {
-                    newMsgId = forwarded[0].id;
-                } else if (forwarded.updates) {
-                    const upd = forwarded.updates.find(u => u.className === 'UpdateNewChannelMessage');
-                    newMsgId = upd?.message?.id ?? null;
-                }
-            } catch(_) {}
 
             console.log(`   ✅ Переслано → msg_id=${newMsgId} в ${config.destinationChannel}`);
 
@@ -587,9 +601,10 @@ async function processChannels(client, saveDiscoveredChannel) {
                 `💬 Комментариев: ${meme.replies || 0}`,
             ].join('\n');
 
-            const botRes = await botSendMessage(BOT_CHAT || config.destinationChannel, text, newMsgId)
+            const botRes = await botSendMessage(BOT_CHAT || currentConfig.destinationChannel, text, newMsgId)
                 .catch(e => { console.error('Bot send error:', e.message); return null; });
             if (botRes && !botRes.ok) console.log(`   ⚠️ Bot API: ${botRes.description}`);
+            else if (botRes && botRes.ok) console.log(`   📊 Статистика отправлена.`);
 
             // Сохраняем в базу анти-баяна
             await saveToDatabase(buffer, meme.id, meme.channel);
@@ -604,8 +619,8 @@ async function processChannels(client, saveDiscoveredChannel) {
     } // end if (!floodBanActive)
 
     saveEntityCache(); // Сохраняем все накопленные entities
-    const nextIn = Math.round((30 * 60 * 1000 - (Date.now() % (30*60*1000))) / 60000);
-    console.log(`\n✅ Итерация завершена. Переслано: ${floodBanActive ? 0 : forwardedCount} мемов.`);
+    const _fwdCount = (typeof forwardedCount !== 'undefined') ? forwardedCount : 0;
+    console.log(`\n✅ Итерация завершена. Переслано: ${floodBanActive ? 0 : _fwdCount} мемов.`);
     console.log(`⏰ Следующий прогон через ~30 мин (в ${new Date(Date.now() + 30*60*1000).toLocaleTimeString('ru')})`);
 
     // ── Итоговый отчёт в канал ───────────────────────────────────────────────
@@ -656,11 +671,19 @@ async function processChannels(client, saveDiscoveredChannel) {
 
                 for (const dupe of topDupes) {
                     try {
-                        // Пересылаем оригинальный мем в бот-канал
-                        await client.forwardMessages(
-                            destPeer || currentConfig.destinationChannel,
-                            { messages: [parseInt(dupe.messageId)], fromPeer: dupe.channelId }
-                        );
+                        // Используем invoke чтобы не триггерить ResolveUsername
+                        const dupFromPeer = dupe.channelId
+                            ? (() => { const ce = entityCache[String(dupe.channelId).toLowerCase().replace('@','')]; return ce ? new Api.InputPeerChannel({ channelId: BigInt(ce.id), accessHash: BigInt(ce.accessHash) }) : dupe.channelId; })()
+                            : null;
+                        if (!dupFromPeer) throw new Error('no peer for dupe ' + dupe.channelId);
+                        await client.invoke(new Api.messages.ForwardMessages({
+                            fromPeer: dupFromPeer,
+                            id: [parseInt(dupe.messageId)],
+                            toPeer: destPeer,
+                            randomId: [BigInt(Math.floor(Math.random() * 2**52))],
+                            silent: false, background: false, withMyScore: false,
+                            dropAuthor: false, dropMediaCaptions: false, noforwards: false,
+                        }));
                         // Подпись: Самая копируемая картинка + список каналов
                         const seenLinks = (dupe.seenIn && dupe.seenIn.length > 0)
                             ? dupe.seenIn.map(x => '  • <a href="https://t.me/' + x.channel + '/' + x.msgId + '">' + x.channel + '</a>').join('\n')
