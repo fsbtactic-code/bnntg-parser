@@ -298,10 +298,7 @@ async function processChannels(client, saveDiscoveredChannel) {
     console.log(`   ├─ Кандидатов найдено: ${allMemes.length}`);
     console.log(`   └─ Channel Memory: ${Object.keys(memory).length} каналов в базе (накопл.)`);
 
-    // Адаптивный порог: публикуем только то, что значительно выше среднего
-    const allScores = allMemes.map(m => m.vi);
-    const threshold = adaptiveThreshold(allScores);
-    console.log(`📈 Адаптивный порог CFS: ${Math.round(threshold)} (среднее × 1.5)`);
+
 
     // Сортируем по Composite Final Score
     allMemes.sort((a, b) => b.vi - a.vi);
@@ -311,9 +308,14 @@ async function processChannels(client, saveDiscoveredChannel) {
         console.log(`  ${i+1}. [@${m.channel}] CFS:${m.vi} RVI:${m.rvi}x Size:${m.sizeM}x Fresh:${m.freshness} React:${m.reactions}`);
     });
 
-    // Фильтруем ниже порога (но только если кандидатов достаточно)
-    const qualified = allMemes.filter(m => allMemes.length < 10 || m.vi >= threshold);
-    console.log(`✅ Квалифицировано: ${qualified.length} из ${allMemes.length}`);
+    // Берём топ кандидатов: сортируем по CFS, отсекаем откровенно слабые (RVI < 1.5)
+    // Без зависимости от «среднего» — берём реальные аномалии
+    const MIN_RVI = 1.5; // минимальная аномалия для публикации
+    const MAX_CANDIDATES = (config.maxMemesToForward || 5) * 3; // пул в 3× больше нужного
+    const qualified = allMemes
+        .filter(m => parseFloat(m.rvi) >= MIN_RVI)
+        .slice(0, MAX_CANDIDATES);
+    console.log(`✅ Квалифицировано (RVI≥${MIN_RVI}): ${qualified.length} из ${allMemes.length}`);
     allMemes.splice(0, allMemes.length, ...qualified);
 
     // Обработка Анти-Баяном и Пересылка
