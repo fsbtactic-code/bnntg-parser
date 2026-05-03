@@ -137,14 +137,21 @@ async function processChannels(client, saveDiscoveredChannel) {
 
     // ── Статистика прохода ──────────────────────────────────────────────────
     const stats = {
-        totalPosts: 0,      // всего постов прошло фильтр (react>=3, views>=100)
-        viral: 0,           // квалифицированы RVI>=1.5
-        dupFiltered: 0,     // отфильтрованы анти-баяном
-        forwarded: 0,       // реально переслано
-        // Размеры каналов
-        lt1k: 0, lt5k: 0, lt10k: 0, lt20k: 0, gt20k: 0
+        totalPosts: 0,
+        viral: 0,
+        dupFiltered: 0,
+        forwarded: 0,
+        // Размеры каналов (по кол-ву подписчиков source-канала)
+        lt1k: 0, lt5k: 0, lt10k: 0, lt20k: 0, gt20k: 0, unknown: 0
     };
-    
+
+    // Загружаем кэш подписчиков один раз до цикла
+    const cachePath = './channel_cache.json';
+    let subsCache = {};
+    if (fs.existsSync(cachePath)) {
+        try { subsCache = JSON.parse(fs.readFileSync(cachePath, 'utf8')); } catch(e){}
+    }
+
     // Временная граница: проверяем посты не старше N часов
     const timeLimitMs = Date.now() - (currentConfig.hoursToCheck * 60 * 60 * 1000);
 
@@ -162,11 +169,21 @@ async function processChannels(client, saveDiscoveredChannel) {
 
             let channelMemes = [];
 
-            // Загружаем кэш один раз перед проверкой сообщений этого канала
-            const cachePath = './channel_cache.json';
-            let subsCache = {};
-            if (fs.existsSync(cachePath)) {
-                try { subsCache = JSON.parse(fs.readFileSync(cachePath, 'utf8')); } catch(e){}
+            // Получаем кол-во подписчиков source-канала из ответа Telegram API
+            // history.chats содержит инфу о самом канале в первом элементе
+            {
+                const srcChat = history.chats && history.chats.find(c => {
+                    const uname = (c.username || '').toLowerCase();
+                    return uname === channel.toLowerCase().replace('@','');
+                });
+                const srcSubs = srcChat ? (srcChat.participantsCount || 0) : null;
+                if (srcSubs === null) {
+                    stats.unknown++;
+                } else if (srcSubs < 1000)  stats.lt1k++;
+                else if (srcSubs < 5000)  stats.lt5k++;
+                else if (srcSubs < 10000) stats.lt10k++;
+                else if (srcSubs < 20000) stats.lt20k++;
+                else                      stats.gt20k++;
             }
 
             for (let msg of history.messages) {
@@ -290,15 +307,6 @@ async function processChannels(client, saveDiscoveredChannel) {
             }
 
             processedCount++;
-
-            // Размер канала для статистики
-            const cData = subsCache[channel];
-            const cSubs = cData ? (typeof cData === 'number' ? cData : (cData.subs || 0)) : 0;
-            if      (cSubs < 1000)  stats.lt1k++;
-            else if (cSubs < 5000)  stats.lt5k++;
-            else if (cSubs < 10000) stats.lt10k++;
-            else if (cSubs < 20000) stats.lt20k++;
-            else                    stats.gt20k++;
 
         } catch (e) {
             console.log(`❌ Ошибка при парсинге ${channel}:`, e.message);
@@ -458,6 +466,7 @@ async function processChannels(client, saveDiscoveredChannel) {
         `   до 10 000 подп.: ${stats.lt10k}`,
         `   до 20 000 подп.: ${stats.lt20k}`,
         `   свыше 20 000: ${stats.gt20k}`,
+        ...(stats.unknown > 0 ? [`   ❓ нет данных: ${stats.unknown}`] : []),
         ``,
         `🔍 <b>Посты:</b>`,
         `   Найдено (react≥3, views≥100): ${stats.totalPosts}`,
