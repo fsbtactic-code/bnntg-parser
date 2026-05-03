@@ -58,9 +58,15 @@ function hammingDistance(h1, h2) {
  */
 async function isDuplicate(imageBuffer, threshold = 5) {
     try {
+        // Для видео (mp4) Jimp не работает — пропускаем pHash, опираемся на ID-дедуп (channelId+messageId)
+        const isVideo = imageBuffer.length > 4 &&
+            (imageBuffer[0] === 0 && imageBuffer[4] === 0x66 && imageBuffer[5] === 0x74 && imageBuffer[6] === 0x79 && imageBuffer[7] === 0x70) ||
+            (imageBuffer.slice(4,8).toString('ascii') === 'ftyp'); // mp4 signature
+        if (isVideo) return false; // видео проверяем только по ID (см. saveToDatabase)
+
         const newHash = await getPHash(imageBuffer);
         for (const row of hashCache) {
-            if (hammingDistance(newHash, row.hash) <= threshold) return true;
+            if (row.hash && hammingDistance(newHash, row.hash) <= threshold) return true;
         }
         return false;
     } catch (e) {
@@ -74,10 +80,16 @@ async function isDuplicate(imageBuffer, threshold = 5) {
  */
 async function saveToDatabase(imageBuffer, messageId, channelId) {
     try {
-        const hash = await getPHash(imageBuffer);
-        const entry = { hash, messageId, channelId, ts: Date.now() };
+        // Для видео используем ID-идентификатор вместо pHash
+        let hash;
+        try {
+            hash = await getPHash(imageBuffer);
+        } catch (e) {
+            // видео или неподдерживаемый формат — используем ID
+            hash = null;
+        }
+        const entry = { hash, messageId: String(messageId), channelId: String(channelId), ts: Date.now() };
         hashCache.push(entry);
-        // Держим не более 50 000 хэшей (≈ ~3MB JSON)
         if (hashCache.length > 50000) hashCache = hashCache.slice(-50000);
         saveHashes(hashCache);
     } catch (e) {
