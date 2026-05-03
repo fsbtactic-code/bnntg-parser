@@ -174,7 +174,7 @@ input[type=number].inp::-webkit-inner-spin-button{-webkit-appearance:none}
 
 <script>
 const A='/api/channels', D='/api/discovered';
-let active=[], disc=[], tab='active', sel=new Set();
+let active=[], disc=[], tab='active', sel=new Set(), lastFiltered=[];
 
 // toast
 function toast(msg,ok=true){
@@ -226,6 +226,7 @@ function render(){
   const fsmax=isD?parseFloat(document.getElementById('f-smax').value)||null:null;
   const frep=isD?parseInt(document.getElementById('f-rep').value)||null:null;
 
+
   const filtered=src.filter(item=>{
     const ch=(item.channel||'').toLowerCase();
     const ti=(item.title||'').toLowerCase();
@@ -241,6 +242,8 @@ function render(){
     if(frep!==null&&rc<frep) return false;
     return true;
   });
+
+  lastFiltered = filtered; // сохраняем для toggleAll
 
   if(!filtered.length){
     document.getElementById('list').innerHTML=`<div class="empty">${src.length?'Ничего не найдено по фильтрам':'Загрузка данных...'}</div>`;
@@ -287,7 +290,7 @@ function render(){
 
 // selection
 function toggleSel(ch,on){ if(on)sel.add(ch);else sel.delete(ch); const r=document.getElementById('row-'+ch);if(r)r.classList.toggle('sel',on); updBulk(); }
-function toggleAll(on){ disc.forEach(i=>{ if(on)sel.add(i.channel);else sel.delete(i.channel); }); updBulk(); render(); }
+function toggleAll(on){ lastFiltered.forEach(i=>{ if(on)sel.add(i.channel);else sel.delete(i.channel); }); updBulk(); render(); }
 function clearSel(){ sel.clear(); document.getElementById('chk-all').checked=false; updBulk(); render(); }
 function updBulk(){ document.getElementById('sel-n').textContent=sel.size; }
 
