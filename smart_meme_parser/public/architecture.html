@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>🍌 BananaParser — Архитектура</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0a0f;color:#e8e8ff;font-family:'Segoe UI',sans-serif;overflow-x:hidden}
+.page{max-width:1400px;margin:0 auto;padding:40px 24px}
+h1{font-size:2.4rem;background:linear-gradient(135deg,#f7c948,#ff6b35,#c84b8f);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:8px}
+.subtitle{color:#888;margin-bottom:48px;font-size:1rem}
+
+/* SECTION */
+.section{margin-bottom:56px}
+.section-title{font-size:1.3rem;color:#f7c948;border-left:3px solid #f7c948;padding-left:12px;margin-bottom:24px;font-weight:700;letter-spacing:.5px}
+
+/* FLOW DIAGRAM */
+.flow{display:flex;align-items:center;gap:0;flex-wrap:wrap;justify-content:center;margin-bottom:12px}
+.node{background:linear-gradient(135deg,#1a1a2e,#16213e);border:1px solid #2a2a4a;border-radius:12px;padding:16px 20px;text-align:center;min-width:130px;position:relative}
+.node .icon{font-size:1.6rem;margin-bottom:6px}
+.node .label{font-size:.78rem;color:#ccd;font-weight:600}
+.node .sub{font-size:.66rem;color:#666;margin-top:3px}
+.node.green{border-color:#2ecc71;box-shadow:0 0 12px #2ecc7133}
+.node.orange{border-color:#f7c948;box-shadow:0 0 12px #f7c94833}
+.node.blue{border-color:#4a9fff;box-shadow:0 0 12px #4a9fff33}
+.node.purple{border-color:#c84b8f;box-shadow:0 0 12px #c84b8f33}
+.node.red{border-color:#ff4757;box-shadow:0 0 12px #ff475733}
+.arrow{color:#444;font-size:1.4rem;padding:0 6px;flex-shrink:0}
+
+/* MATH CARDS */
+.math-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:20px}
+.math-card{background:linear-gradient(135deg,#111120,#1a1a30);border:1px solid #2a2a4a;border-radius:14px;padding:24px}
+.math-card h3{color:#f7c948;font-size:1rem;margin-bottom:14px;display:flex;align-items:center;gap:8px}
+.formula{background:#0d0d1a;border-radius:8px;padding:14px;font-family:'Courier New',monospace;font-size:.82rem;color:#88ddff;line-height:1.7;margin:10px 0;border-left:3px solid #4a9fff}
+.formula .var{color:#f7c948}
+.formula .op{color:#ff6b35}
+.formula .comment{color:#444;font-style:italic}
+.pill{display:inline-block;background:#1e1e3a;border:1px solid #3a3a5a;border-radius:20px;padding:3px 10px;font-size:.72rem;color:#aaa;margin:2px}
+
+/* TABLE */
+.data-table{width:100%;border-collapse:collapse;font-size:.82rem}
+.data-table th{background:#1a1a30;color:#f7c948;padding:10px 14px;text-align:left;font-weight:600;border-bottom:1px solid #2a2a4a}
+.data-table td{padding:9px 14px;border-bottom:1px solid #1a1a2a;color:#ccd}
+.data-table tr:hover td{background:#ffffff08}
+.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.7rem;font-weight:700}
+.badge.g{background:#1a3a1a;color:#2ecc71;border:1px solid #2ecc71}
+.badge.y{background:#3a2a00;color:#f7c948;border:1px solid #f7c948}
+.badge.r{background:#3a0a0a;color:#ff4757;border:1px solid #ff4757}
+
+/* SVG arch */
+.arch-svg{width:100%;background:#0d0d1a;border-radius:16px;border:1px solid #2a2a4a;overflow:hidden}
+</style>
+</head>
+<body>
+<div class="page">
+
+<h1>🍌 BananaParser — Архитектура системы</h1>
+<p class="subtitle">Умный парсер вирусных мемов · v2.0 · Channel EMA Memory + Composite Virality Score</p>
+
+<!-- PIPELINE FLOW -->
+<div class="section">
+  <div class="section-title">⚙️ Основной конвейер (каждые 30 мин)</div>
+  <div class="flow">
+    <div class="node green"><div class="icon">⏰</div><div class="label">Scheduler</div><div class="sub">setInterval 30m</div></div>
+    <div class="arrow">→</div>
+    <div class="node blue"><div class="icon">📡</div><div class="label">TG Client MTProto</div><div class="sub">gramjs · 176 каналов</div></div>
+    <div class="arrow">→</div>
+    <div class="node orange"><div class="icon">🧮</div><div class="label">Virality Engine</div><div class="sub">CFS · RVI · EMA</div></div>
+    <div class="arrow">→</div>
+    <div class="node purple"><div class="icon">🔍</div><div class="label">Anti-Bayan</div><div class="sub">pHash · JSON DB</div></div>
+    <div class="arrow">→</div>
+    <div class="node green"><div class="icon">🚀</div><div class="label">Forward</div><div class="sub">@memesbanana</div></div>
+    <div class="arrow">→</div>
+    <div class="node orange"><div class="icon">🤖</div><div class="label">Bot Analytics</div><div class="sub">Bot API reply</div></div>
+  </div>
+  <div class="flow" style="margin-top:8px">
+    <div class="node" style="min-width:200px"><div class="icon">💾</div><div class="label">Channel Memory (EMA)</div><div class="sub">channel_memory.json — обновляется каждый прогон</div></div>
+    <div class="arrow">↑ обновление</div>
+    <div class="node" style="min-width:200px"><div class="icon">🌐</div><div class="label">Discovered Channels</div><div class="sub">discovered_channels.json · repostCount</div></div>
+    <div class="arrow">↑ добавление</div>
+    <div class="node" style="min-width:200px"><div class="icon">🔎</div><div class="label">t.me scraper</div><div class="sub">Подписчики нового канала через HTML</div></div>
+  </div>
+</div>
+
+<!-- MATH -->
+<div class="section">
+  <div class="section-title">📐 Математика: Composite Final Score (CFS)</div>
+  <div class="math-grid">
+
+    <div class="math-card">
+      <h3>1️⃣ Базовая Вирусность (VI)</h3>
+      <div class="formula">
+<span class="var">VI</span> <span class="op">=</span> views <span class="op">+</span> reactions <span class="op">×</span> 5 <span class="op">+</span> replies <span class="op">×</span> 3
+<span class="comment">// Реакции важнее просмотров в 5×</span>
+<span class="comment">// Комментарии — сильный сигнал вовлечения</span>
+      </div>
+      <span class="pill">views</span><span class="pill">reactions ×5</span><span class="pill">replies ×3</span>
+    </div>
+
+    <div class="math-card">
+      <h3>2️⃣ Channel EMA Memory (сглаживание)</h3>
+      <div class="formula">
+<span class="var">EMA</span> <span class="op">=</span> α <span class="op">×</span> VI <span class="op">+</span> (1 <span class="op">-</span> α) <span class="op">×</span> prev_EMA
+<span class="var">α</span> <span class="op">=</span> 0.3  <span class="comment">// коэффициент сглаживания</span>
+<span class="comment">// Накопительная история канала</span>
+<span class="comment">// Первый пост: EMA = VI</span>
+      </div>
+      <span class="pill">накопительный</span><span class="pill">α=0.3</span><span class="pill">JSON хранилище</span>
+    </div>
+
+    <div class="math-card">
+      <h3>3️⃣ Relative Virality Index (RVI)</h3>
+      <div class="formula">
+<span class="var">RVI</span> <span class="op">=</span> VI <span class="op">/</span> max(EMA, 1)
+<span class="comment">// Насколько пост аномален для канала</span>
+<span class="comment">// RVI=3 → пост в 3× лучше среднего</span>
+<span class="comment">// Уравнивает большие и малые каналы</span>
+      </div>
+      <span class="pill">аномалия</span><span class="pill">масштабинвариант</span>
+    </div>
+
+    <div class="math-card">
+      <h3>4️⃣ Size Multiplier (нормализация)</h3>
+      <div class="formula">
+<span class="var">sizeM</span> <span class="op">=</span> min(subs / medianSubs, 3.0)
+<span class="var">medianSubs</span> <span class="op">=</span> median(all channel subs)
+<span class="comment">// Бонус крупным каналам, но не более ×3</span>
+<span class="comment">// Малый канал с 50K subs → sizeM≈0.5</span>
+      </div>
+      <span class="pill">cap ×3</span><span class="pill">медиана нормировка</span>
+    </div>
+
+    <div class="math-card">
+      <h3>5️⃣ Freshness (давность публикации)</h3>
+      <div class="formula">
+<span class="var">age</span> <span class="op">=</span> (now <span class="op">-</span> postDate) / 3600 <span class="comment">// часы</span>
+<span class="var">window</span> <span class="op">=</span> hoursToCheck <span class="op">×</span> 2
+<span class="var">freshness</span> <span class="op">=</span> max(0, 1 <span class="op">-</span> age <span class="op">/</span> window)
+<span class="comment">// Старый пост → freshness → 0</span>
+<span class="comment">// Свежий (0h) → freshness = 1.0</span>
+      </div>
+      <span class="pill">временной штраф</span><span class="pill">линейный спад</span>
+    </div>
+
+    <div class="math-card">
+      <h3>6️⃣ Composite Final Score (CFS)</h3>
+      <div class="formula">
+<span class="var">CFS</span> <span class="op">=</span> RVI <span class="op">×</span> sizeM <span class="op">×</span> (0.7 <span class="op">+</span> 0.3 <span class="op">×</span> freshness)
+<span class="comment">// freshness даёт 70%-100% веса</span>
+<span class="comment">// Пример: RVI=5 × sizeM=2 × 0.85 = 8.5</span>
+<span class="comment">// Публикуем только CFS > adaptiveThreshold</span>
+      </div>
+      <span class="pill">итоговый ранг</span><span class="pill">70% freshness floor</span>
+    </div>
+
+    <div class="math-card">
+      <h3>7️⃣ Adaptive Threshold</h3>
+      <div class="formula">
+<span class="var">mean</span> <span class="op">=</span> avg(all CFS scores)
+<span class="var">threshold</span> <span class="op">=</span> mean <span class="op">×</span> 1.5
+<span class="comment">// Топ ~33% публикаций проходит</span>
+<span class="comment">// Автоматически масштабируется</span>
+<span class="comment">// с качеством выборки</span>
+      </div>
+      <span class="pill">динамический</span><span class="pill">mean ×1.5</span>
+    </div>
+
+    <div class="math-card">
+      <h3>8️⃣ Repost Discovery Score</h3>
+      <div class="formula">
+<span class="var">repostCount</span> <span class="op">+=</span> 1 <span class="comment">// каждый раз когда виден</span>
+<span class="comment">// Каналы с repostCount > 1</span>
+<span class="comment">// показываются первыми в UI</span>
+<span class="comment">// Сигнал: канал репостят часто</span>
+<span class="comment">// → вероятно качественный источник</span>
+      </div>
+      <span class="pill">накопительный</span><span class="pill">приоритет в UI</span>
+    </div>
+
+  </div>
+</div>
+
+<!-- SCORING EXAMPLE -->
+<div class="section">
+  <div class="section-title">📊 Пример расчёта для реального мема</div>
+  <table class="data-table">
+    <thead>
+      <tr><th>Параметр</th><th>Значение</th><th>Формула</th><th>Результат</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Просмотры</td><td>45 000</td><td>views</td><td>45000</td></tr>
+      <tr><td>Реакции</td><td>2 100</td><td>reactions × 5</td><td>10500</td></tr>
+      <tr><td>Комментарии</td><td>180</td><td>replies × 3</td><td>540</td></tr>
+      <tr><td><b>VI</b></td><td>—</td><td>sum</td><td><b>56040</b></td></tr>
+      <tr><td>EMA канала</td><td>12000</td><td>история</td><td>12000</td></tr>
+      <tr><td><b>RVI</b></td><td>—</td><td>56040 / 12000</td><td><b>4.67×</b></td></tr>
+      <tr><td>Подписчиков</td><td>85K</td><td>—</td><td>—</td></tr>
+      <tr><td>medianSubs</td><td>120K</td><td>—</td><td>—</td></tr>
+      <tr><td><b>sizeM</b></td><td>—</td><td>min(85/120, 3)</td><td><b>0.71×</b></td></tr>
+      <tr><td>Возраст</td><td>1.2ч</td><td>—</td><td>—</td></tr>
+      <tr><td><b>freshness</b></td><td>—</td><td>1 - 1.2/(0.5×2)</td><td><b>0.76</b></td></tr>
+      <tr><td><b>CFS</b></td><td>—</td><td>4.67 × 0.71 × (0.7 + 0.3×0.76)</td><td><b class="badge g">3.41</b></td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- FILES -->
+<div class="section">
+  <div class="section-title">🗂️ Файловая структура</div>
+  <table class="data-table">
+    <thead><tr><th>Файл</th><th>Роль</th><th>Обновление</th></tr></thead>
+    <tbody>
+      <tr><td>index.js</td><td>Главный парсер — авторизация, сбор, отбор, пересылка</td><td class="badge y">каждый прогон</td></tr>
+      <tr><td>virality.js</td><td>CFS, RVI, EMA, adaptiveThreshold, loadMemory/saveMemory</td><td class="badge g">постоянно</td></tr>
+      <tr><td>dedup.js</td><td>pHash через Jimp, хранилище хэшей в JSON</td><td class="badge y">каждый forward</td></tr>
+      <tr><td>admin_server.js</td><td>Express UI — управление каналами, статистика, настройки</td><td class="badge g">постоянно</td></tr>
+      <tr><td>config.json</td><td>targetChannels, destinationChannel, hoursToCheck, maxMemes</td><td class="badge r">ручное / UI</td></tr>
+      <tr><td>channel_memory.json</td><td>EMA-история каждого канала (VI за всё время)</td><td class="badge y">каждый прогон</td></tr>
+      <tr><td>discovered_channels.json</td><td>Автообнаруженные каналы через репосты + repostCount</td><td class="badge y">при репостах</td></tr>
+      <tr><td>subs_cache.json</td><td>Кэш подписчиков каналов из t.me (TTL не ограничен)</td><td class="badge y">при новых каналах</td></tr>
+      <tr><td>phash_db.json</td><td>База перцептивных хэшей для анти-баяна</td><td class="badge y">каждый forward</td></tr>
+      <tr><td>.env</td><td>BOT_TOKEN, BOT_CHANNEL_ID (не в git)</td><td class="badge r">ручное</td></tr>
+      <tr><td>session.txt</td><td>MTProto сессия аккаунта (не в git)</td><td class="badge r">раз при логине</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- SERVICES -->
+<div class="section">
+  <div class="section-title">🖥️ Инфраструктура (GCP · 34.55.180.88)</div>
+  <div class="flow" style="justify-content:flex-start;gap:16px;flex-wrap:wrap">
+    <div class="node green" style="min-width:180px"><div class="icon">🟢</div><div class="label">banana-parser</div><div class="sub">PM2 · id=4 · Node 18<br>MTProto + Virality + Forward</div></div>
+    <div class="node blue" style="min-width:180px"><div class="icon">🔵</div><div class="label">banana-admin</div><div class="sub">PM2 · id=0 · Express<br>:3000 → Admin UI</div></div>
+    <div class="node orange" style="min-width:180px"><div class="icon">🌐</div><div class="label">nginx</div><div class="sub">Reverse proxy<br>HTTPS → :3000</div></div>
+    <div class="node purple" style="min-width:180px"><div class="icon">🤖</div><div class="label">Bot API</div><div class="sub">6953273356:…<br>reply_to_message_id</div></div>
+  </div>
+  <br>
+  <table class="data-table">
+    <thead><tr><th>Процесс</th><th>Статус</th><th>Память</th><th>Перезапуски</th></tr></thead>
+    <tbody>
+      <tr><td>banana-parser (id=4)</td><td><span class="badge g">online</span></td><td>~140MB</td><td>0 (чистый старт)</td></tr>
+      <tr><td>banana-admin (id=0)</td><td><span class="badge g">online</span></td><td>~83MB</td><td>2</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ANTI-BAYAN -->
+<div class="section">
+  <div class="section-title">🔍 Анти-Баян: pHash алгоритм</div>
+  <div class="math-grid">
+    <div class="math-card">
+      <h3>Алгоритм перцептивного хэширования</h3>
+      <div class="formula">
+1. resize(img, 8×8) → grayscale
+2. compute DCT (discrete cosine transform)
+3. take top-left 8×8 of DCT
+4. <span class="var">mean</span> = avg(64 values)
+5. <span class="var">hash</span> = bits where pixel &gt; mean
+6. <span class="var">distance</span> = hamming(hash1, hash2)
+7. isDupe = distance &lt; threshold(10)
+      </div>
+    </div>
+    <div class="math-card">
+      <h3>Хранилище хэшей</h3>
+      <div class="formula">
+phash_db.json: [
+  { id, channel, hash, date },
+  ...
+]
+<span class="comment">// JSON вместо SQLite</span>
+<span class="comment">// совместим с любой платформой</span>
+<span class="comment">// hamming distance &lt; 10 → баян</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<footer style="text-align:center;color:#333;padding:40px 0;font-size:.8rem">
+  BananaParser v2.0 · CFS + EMA + pHash · 176 каналов · 🍌
+</footer>
+
+</div>
+</body>
+</html>

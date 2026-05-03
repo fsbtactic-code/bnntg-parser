@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>🍌 Banana Meme · Панель</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#060606;color:#d4d4d4;font-family:'Inter',sans-serif;min-height:100vh;font-size:14px}
+::-webkit-scrollbar{width:3px}::-webkit-scrollbar-track{background:#0a0a0a}::-webkit-scrollbar-thumb{background:#222;border-radius:2px}
+
+.shell{max-width:1080px;margin:0 auto;padding:28px 20px}
+
+/* ── header ── */
+.hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:28px}
+.logo{display:flex;align-items:center;gap:10px}
+.logo-icon{width:38px;height:38px;border-radius:12px;background:linear-gradient(135deg,#1a1a1a,#111);border:1px solid #1e1e1e;display:flex;align-items:center;justify-content:center;font-size:18px;box-shadow:0 2px 12px rgba(0,0,0,.5)}
+.logo-name{font-size:16px;font-weight:700;color:#fff;letter-spacing:-.3px}
+.logo-sub{font-size:11px;color:#3a3a3a;margin-top:1px}
+.status{display:flex;align-items:center;gap:6px;font-size:11px;color:#3a3a3a}
+.dot{width:6px;height:6px;border-radius:50%;background:#22c55e;box-shadow:0 0 6px #22c55e;animation:blink 2s infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+
+/* ── stats ── */
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:20px}
+.stat{background:#0c0c0c;border:1px solid #161616;border-radius:12px;padding:14px 18px;position:relative;overflow:hidden}
+.stat::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,#1e1e1e,transparent)}
+.stat-lbl{font-size:10px;color:#333;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px}
+.stat-val{font-size:24px;font-weight:700;color:#fff;line-height:1}
+
+/* ── add form ── */
+.addf{display:flex;gap:8px;margin-bottom:18px}
+.inp{flex:1;background:#0e0e0e;border:1px solid #1a1a1a;color:#e0e0e0;border-radius:9px;padding:10px 14px;font-size:13px;font-family:'Inter',sans-serif;outline:none;transition:border .15s}
+.inp:focus{border-color:#2a2a2a}
+.inp::placeholder{color:#2c2c2c}
+input[type=number].inp{-moz-appearance:textfield}
+input[type=number].inp::-webkit-inner-spin-button{-webkit-appearance:none}
+
+/* ── buttons ── */
+.btn{border:none;border-radius:9px;padding:10px 18px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Inter',sans-serif;transition:all .15s;white-space:nowrap;display:inline-flex;align-items:center;gap:5px}
+.btn:disabled{opacity:.35;cursor:not-allowed}
+.btn-white{background:#fff;color:#000}.btn-white:hover:not(:disabled){opacity:.88}
+.btn-dim{background:#111;border:1px solid #1e1e1e;color:#666}.btn-dim:hover:not(:disabled){color:#ccc;border-color:#2e2e2e}
+.btn-red{background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.18);color:#f87171}.btn-red:hover:not(:disabled){background:rgba(239,68,68,.18)}
+.btn-grn{background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.18);color:#4ade80}.btn-grn:hover:not(:disabled){background:rgba(34,197,94,.18)}
+
+/* ── tabs ── */
+.tabrow{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px}
+.tabs{display:flex;gap:2px;background:#0c0c0c;border:1px solid #161616;border-radius:10px;padding:3px}
+.tab{padding:7px 16px;border-radius:7px;font-size:12px;font-weight:500;color:#444;cursor:pointer;border:none;background:transparent;font-family:'Inter',sans-serif;transition:all .15s;white-space:nowrap}
+.tab.on{background:#181818;color:#ddd}
+.tab:hover:not(.on){color:#888}
+.cnt-badge{background:#16a34a;color:#fff;border-radius:5px;font-size:10px;font-weight:700;padding:1px 6px;margin-left:4px}
+.tbtools{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+
+/* ── filters ── */
+.fbox{background:#090909;border:1px solid #151515;border-radius:11px;padding:14px 16px;margin-bottom:12px;display:none}
+.fbox.open{display:block}
+.fgrid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:10px}
+.fsub{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
+.flbl{font-size:10px;color:#2e2e2e;text-transform:uppercase;letter-spacing:.07em;margin-bottom:5px}
+
+/* ── bulk bar ── */
+.bbar{background:#0e0e0e;border:1px solid #1c1c1c;border-radius:10px;padding:9px 14px;display:none;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap}
+.bbar.open{display:flex}
+.bbar-cnt{font-size:12px;color:#555;flex:1;min-width:80px}
+.bbar-cnt strong{color:#ccc}
+.chkall{width:15px;height:15px;accent-color:#fff;cursor:pointer}
+
+/* ── channel cards ── */
+.clist{display:flex;flex-direction:column;gap:6px}
+.card{background:#0c0c0c;border:1px solid #161616;border-radius:12px;padding:14px 16px;display:flex;align-items:flex-start;gap:12px;transition:border-color .15s;position:relative}
+.card:hover{border-color:#222}
+.card.sel{border-color:#252525;background:#0f0f0f}
+.chk{width:16px;height:16px;accent-color:#fff;cursor:pointer;flex-shrink:0;margin-top:3px}
+.ava{width:42px;height:42px;border-radius:50%;background:#111;border:1px solid #1c1c1c;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:700;color:#333;flex-shrink:0;text-transform:uppercase}
+.info{flex:1;min-width:0}
+.info-top{display:flex;align-items:center;gap:8px;margin-bottom:3px;flex-wrap:wrap}
+.chname{font-size:15px;font-weight:600;color:#e8e8e8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:340px;text-decoration:none}
+.chname:hover{color:#fff}
+.bage-active{background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.15);color:#4ade80;border-radius:5px;font-size:9px;font-weight:600;padding:2px 7px;letter-spacing:.04em;text-transform:uppercase}
+.chuser{font-size:11px;color:#2e2e2e;margin-bottom:6px}
+.chdesc{font-size:12px;color:#2e2e2e;line-height:1.55;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.meta{display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0;min-width:90px}
+.meta-lbl{font-size:9px;color:#2a2a2a;text-transform:uppercase;letter-spacing:.06em}
+.meta-val{font-size:15px;font-weight:600;color:#555}
+.meta-reposts{font-size:11px;color:#2a2a2a}
+.meta-reposts.hot{color:#854d0e}
+.acts{display:flex;gap:5px;align-items:center;flex-shrink:0}
+.ab{width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;cursor:pointer;border:1px solid #181818;background:#111;color:#3a3a3a;font-size:13px;transition:all .15s;text-decoration:none}
+.ab:hover{border-color:#2a2a2a;color:#aaa}
+.ab.del:hover{border-color:#7f1d1d;color:#f87171;background:#140808}
+.ab.add:hover{border-color:#14532d;color:#4ade80;background:#081408}
+
+/* ── empty / toast ── */
+.empty{text-align:center;padding:60px 0;color:#222;font-size:13px}
+#toast{position:fixed;bottom:20px;right:20px;background:#111;border:1px solid #222;border-radius:11px;padding:10px 16px;font-size:12px;display:flex;align-items:center;gap:8px;z-index:9999;transform:translateY(50px);opacity:0;transition:all .25s;pointer-events:none;max-width:340px}
+#toast.show{transform:translateY(0);opacity:1}
+#ti{font-size:14px}
+</style>
+</head>
+<body>
+<div id="toast"><span id="ti">✓</span><span id="tm"></span></div>
+<div class="shell">
+
+  <!-- header -->
+  <div class="hdr">
+    <div class="logo">
+      <div class="logo-icon">🍌</div>
+      <div><div class="logo-name">Banana Meme</div><div class="logo-sub">Панель управления парсером</div></div>
+    </div>
+    <div style="display:flex;align-items:center;gap:12px">
+      <a href="/architecture.html" target="_blank" style="font-size:11px;color:#444;text-decoration:none;background:#0e0e0e;border:1px solid #1a1a1a;border-radius:7px;padding:5px 11px;transition:color .15s" onmouseover="this.style.color='#888'" onmouseout="this.style.color='#444'">📐 Архитектура</a>
+      <div class="status"><div class="dot"></div>Онлайн</div>
+    </div>
+  </div>
+
+
+  <!-- stats -->
+  <div class="stats">
+    <div class="stat"><div class="stat-lbl">Активных источников</div><div class="stat-val" id="s-active">—</div></div>
+    <div class="stat"><div class="stat-lbl">Найдено каналов</div><div class="stat-val" id="s-disc">—</div></div>
+    <div class="stat"><div class="stat-lbl">Окно парсинга</div><div class="stat-val">30 мин</div></div>
+  </div>
+
+  <!-- add -->
+  <div class="addf">
+    <input class="inp" id="ch-inp" type="text" placeholder="@username или ссылка t.me/...">
+    <button class="btn btn-white" id="add-btn" onclick="doAdd()">+ Добавить</button>
+  </div>
+
+  <!-- tabs -->
+  <div class="tabrow">
+    <div class="tabs">
+      <button class="tab on" id="tab-a" onclick="setTab('active')">Активные <span id="cnt-a" style="color:#444;font-size:11px"></span></button>
+      <button class="tab" id="tab-d" onclick="setTab('disc')">Найденные <span class="cnt-badge" id="cnt-d" style="display:none"></span></button>
+    </div>
+    <div class="tbtools">
+      <input class="inp" id="search" type="text" placeholder="Поиск..." style="width:170px;padding:8px 12px;font-size:12px" oninput="render()">
+      <button class="btn btn-dim" id="f-toggle" onclick="toggleF()" style="display:none">⚙ Фильтры</button>
+      <button class="btn btn-dim" id="enr-btn" onclick="doEnrich()" style="display:none" title="Обновить метаданные">↻</button>
+    </div>
+  </div>
+
+  <!-- filters -->
+  <div class="fbox" id="fbox">
+    <div class="fgrid">
+      <div><div class="flbl">@Username</div><input class="inp" id="f-user" type="text" placeholder="часть username" style="width:100%" oninput="render()"></div>
+      <div><div class="flbl">Название</div><input class="inp" id="f-title" type="text" placeholder="слово в названии" style="width:100%" oninput="render()"></div>
+      <div><div class="flbl">Описание</div><input class="inp" id="f-desc" type="text" placeholder="слово в описании" style="width:100%" oninput="render()"></div>
+    </div>
+    <div class="fsub">
+      <div><div class="flbl">Подписчики от</div><input class="inp" id="f-smin" type="number" placeholder="0" style="width:100%" oninput="render()"></div>
+      <div><div class="flbl">Подписчики до</div><input class="inp" id="f-smax" type="number" placeholder="∞" style="width:100%" oninput="render()"></div>
+      <div><div class="flbl">Мин. репостов</div><input class="inp" id="f-rep" type="number" placeholder="1" style="width:100%" oninput="render()"></div>
+    </div>
+    <div style="margin-top:10px">
+      <button class="btn btn-dim" onclick="clearF()" style="font-size:11px;padding:6px 12px">Сбросить всё</button>
+    </div>
+  </div>
+
+  <!-- bulk bar -->
+  <div class="bbar" id="bbar">
+    <input type="checkbox" class="chkall" id="chk-all" onchange="toggleAll(this.checked)">
+    <span class="bbar-cnt"><strong id="sel-n">0</strong> выбрано</span>
+    <button class="btn btn-grn" onclick="bulkAdd()">+ В парсинг</button>
+    <button class="btn btn-red" onclick="bulkIgnore()">✕ В ЧС</button>
+    <button class="btn btn-dim" onclick="clearSel()" style="margin-left:auto;font-size:11px">Снять</button>
+  </div>
+
+  <div class="clist" id="list"></div>
+</div>
+
+<script>
+const A='/api/channels', D='/api/discovered';
+let active=[], disc=[], tab='active', sel=new Set();
+
+// toast
+function toast(msg,ok=true){
+  const el=document.getElementById('toast');
+  const ti=document.getElementById('ti');
+  ti.textContent=ok?'✓':'✗'; ti.style.color=ok?'#4ade80':'#f87171';
+  document.getElementById('tm').textContent=msg;
+  el.classList.add('show'); clearTimeout(el._t);
+  el._t=setTimeout(()=>el.classList.remove('show'),3000);
+}
+
+// tab
+function setTab(t){
+  tab=t;
+  document.getElementById('tab-a').classList.toggle('on',t==='active');
+  document.getElementById('tab-d').classList.toggle('on',t==='disc');
+  const isD=t==='disc';
+  document.getElementById('f-toggle').style.display=isD?'':'none';
+  document.getElementById('enr-btn').style.display=isD?'':'none';
+  const bbar=document.getElementById('bbar');
+  isD?bbar.classList.add('open'):bbar.classList.remove('open');
+  if(!isD) document.getElementById('fbox').classList.remove('open');
+  sel.clear(); updBulk(); render();
+}
+function toggleF(){ document.getElementById('fbox').classList.toggle('open'); }
+function clearF(){
+  ['f-user','f-title','f-desc','f-smin','f-smax','f-rep','search'].forEach(id=>{const e=document.getElementById(id);if(e)e.value='';});
+  render();
+}
+
+// parse subs string → number
+function parseSubs(s){
+  if(!s||s==='?'||s==='Unknown') return null;
+  const v=String(s).trim().toUpperCase().replace(',','.');
+  if(v.endsWith('M')) return parseFloat(v)*1e6;
+  if(v.endsWith('K')) return parseFloat(v)*1e3;
+  return parseFloat(v)||null;
+}
+
+// render
+function render(){
+  const isD=tab==='disc';
+  const src=isD?disc:active;
+  const q=document.getElementById('search').value.toLowerCase().trim();
+  const fu=isD?document.getElementById('f-user').value.toLowerCase().trim():'';
+  const ft=isD?document.getElementById('f-title').value.toLowerCase().trim():'';
+  const fd=isD?document.getElementById('f-desc').value.toLowerCase().trim():'';
+  const fsmin=isD?parseFloat(document.getElementById('f-smin').value)||null:null;
+  const fsmax=isD?parseFloat(document.getElementById('f-smax').value)||null:null;
+  const frep=isD?parseInt(document.getElementById('f-rep').value)||null:null;
+
+  const filtered=src.filter(item=>{
+    const ch=(item.channel||'').toLowerCase();
+    const ti=(item.title||'').toLowerCase();
+    const de=(item.description||'').toLowerCase();
+    const sn=parseSubs(item.subscribers);
+    const rc=item.count||1;
+    if(q&&!ch.includes(q)&&!ti.includes(q)&&!de.includes(q)) return false;
+    if(fu&&!ch.includes(fu)) return false;
+    if(ft&&!ti.includes(ft)) return false;
+    if(fd&&!de.includes(fd)) return false;
+    if(fsmin!==null&&(sn===null||sn<fsmin)) return false;
+    if(fsmax!==null&&(sn!==null&&sn>fsmax)) return false;
+    if(frep!==null&&rc<frep) return false;
+    return true;
+  });
+
+  if(!filtered.length){
+    document.getElementById('list').innerHTML=`<div class="empty">${src.length?'Ничего не найдено по фильтрам':'Загрузка данных...'}</div>`;
+    return;
+  }
+
+  document.getElementById('list').innerHTML=filtered.map(item=>{
+    const ch=item.channel, nm=item.title||ch;
+    const letter=nm.charAt(0).toUpperCase();
+    const isSel=sel.has(ch);
+    const repCount=item.count||1;
+    const repHot=repCount>=3;
+
+    const chkHtml=isD?`<input type="checkbox" class="chk" ${isSel?'checked':''} onchange="toggleSel('${ch}',this.checked)">`:'';
+    const activeBadge=isD?'':'<span class="bage-active">В парсинге</span>';
+
+    const acts=isD
+      ?`<button class="ab add" title="Добавить в парсинг" onclick="addFromDisc('${ch}')">＋</button>
+         <button class="ab del" title="В чёрный список" onclick="ignoreOne('${ch}')">✕</button>`
+      :`<a class="ab" href="https://t.me/${ch}" target="_blank" title="Открыть">↗</a>
+         <button class="ab del" title="Удалить из парсинга" onclick="delActive('${ch}')">✕</button>`;
+
+    const repostLine=isD?`<div class="meta-reposts${repHot?' hot':''}" title="Сколько раз канал встречался в репостах">${repHot?'🔥':''}Репостов: ${repCount}</div>`:'';
+
+    return `<div class="card${isSel?' sel':''}" id="row-${ch}">
+      ${chkHtml}
+      <div class="ava">${letter}</div>
+      <div class="info">
+        <div class="info-top">
+          <a class="chname" href="https://t.me/${ch}" target="_blank">${nm}</a>${activeBadge}
+        </div>
+        <div class="chuser">@${ch}</div>
+        ${item.description?`<div class="chdesc">${item.description}</div>`:''}
+      </div>
+      <div class="meta">
+        <div class="meta-lbl">Подписчики</div>
+        <div class="meta-val">${item.subscribers||'?'}</div>
+        ${repostLine}
+      </div>
+      <div class="acts">${acts}</div>
+    </div>`;
+  }).join('');
+}
+
+// selection
+function toggleSel(ch,on){ if(on)sel.add(ch);else sel.delete(ch); const r=document.getElementById('row-'+ch);if(r)r.classList.toggle('sel',on); updBulk(); }
+function toggleAll(on){ disc.forEach(i=>{ if(on)sel.add(i.channel);else sel.delete(i.channel); }); updBulk(); render(); }
+function clearSel(){ sel.clear(); document.getElementById('chk-all').checked=false; updBulk(); render(); }
+function updBulk(){ document.getElementById('sel-n').textContent=sel.size; }
+
+// actions
+async function doAdd(){
+  const inp=document.getElementById('ch-inp');
+  const v=inp.value.trim(); if(!v) return;
+  const btn=document.getElementById('add-btn'); btn.disabled=true;btn.textContent='...';
+  try{
+    const r=await fetch(A,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({channel:v})});
+    const d=await r.json();
+    if(r.ok){toast(`@${d.channel} добавлен`);inp.value='';await load();}
+    else toast(d.error||'Ошибка',false);
+  }catch(e){toast('Сеть недоступна',false);}
+  finally{btn.disabled=false;btn.textContent='+ Добавить';}
+}
+
+async function delActive(ch){
+  if(!confirm(`Удалить @${ch} из парсинга?`)) return;
+  try{
+    const r=await fetch(`${A}/${encodeURIComponent(ch)}`,{method:'DELETE'});
+    if(r.ok){toast(`@${ch} удалён`);await load();}
+    else{ const d=await r.json(); toast(d.error||'Ошибка',false); }
+  }catch(e){toast('Ошибка удаления',false);}
+}
+
+async function addFromDisc(ch){
+  try{
+    const r=await fetch(A,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({channel:ch})});
+    const d=await r.json();
+    if(r.ok){toast(`@${ch} добавлен в парсинг`);await load();}
+    else toast(d.error||'Ошибка',false);
+  }catch(e){toast('Ошибка',false);}
+}
+
+async function ignoreOne(ch){
+  if(!confirm(`Занести @${ch} в чёрный список?`)) return;
+  try{
+    const r=await fetch(`${D}/${encodeURIComponent(ch)}`,{method:'DELETE'});
+    if(r.ok){toast(`@${ch} в ЧС`);await load();}
+  }catch(e){}
+}
+
+async function bulkAdd(){
+  if(!sel.size)return;
+  if(!confirm(`Добавить ${sel.size} каналов в парсинг?`))return;
+  try{
+    const r=await fetch(`${A}/bulk`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({channels:[...sel]})});
+    const d=await r.json();
+    if(r.ok){toast(`Добавлено: ${d.added}`);sel.clear();await load();}
+    else toast(d.error||'Ошибка',false);
+  }catch(e){toast('Ошибка',false);}
+}
+
+async function bulkIgnore(){
+  if(!sel.size)return;
+  if(!confirm(`Занести ${sel.size} каналов в ЧС?`))return;
+  try{
+    const r=await fetch(`${D}/bulk-ignore`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({channels:[...sel]})});
+    const d=await r.json();
+    if(r.ok){toast(`В ЧС: ${d.total}`);sel.clear();await load();}
+    else toast(d.error||'Ошибка',false);
+  }catch(e){toast('Ошибка',false);}
+}
+
+async function doEnrich(){
+  const btn=document.getElementById('enr-btn');
+  btn.textContent='⟳'; btn.disabled=true;
+  try{ await fetch('/api/enrich',{method:'POST'}); toast('Обогащение запущено'); }
+  catch(e){}
+  setTimeout(()=>{ btn.textContent='↻'; btn.disabled=false; },3000);
+  setTimeout(load,10000);
+}
+
+// load
+async function load(){
+  try{
+    const [ar,dr]=await Promise.all([fetch(A),fetch(D)]);
+    const ad=await ar.json(), dd=await dr.json();
+    active=ad.channels||[];
+    disc=dd.discovered||[];
+    document.getElementById('s-active').textContent=active.length;
+    document.getElementById('s-disc').textContent=disc.length;
+    document.getElementById('cnt-a').textContent=active.length;
+    const b=document.getElementById('cnt-d');
+    if(disc.length){b.textContent=disc.length;b.style.display='';}
+    else b.style.display='none';
+    render();
+  }catch(e){}
+}
+
+document.getElementById('ch-inp').addEventListener('keydown',e=>{ if(e.key==='Enter')doAdd(); });
+load();
+setInterval(load,15000);
+</script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+{
+    "apiId": 12345678,
+    "apiHash": "your_api_hash_here",
+    "targetChannels": [
+        "example_channel_1",
+        "example_channel_2",
+        "example_channel_3"
+    ],
+    "destinationChannel": "@your_channel",
+    "hoursToCheck": 0.5,
+    "maxMemesToForward": 5
+}

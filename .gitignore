@@ -1,0 +1,28 @@
+# ─── Секретные файлы (НИКОГДА не пушить) ───
+smart_meme_parser/session.txt
+smart_meme_parser/.env
+
+# ─── Конфиг с личными каналами ───
+smart_meme_parser/config.json
+
+# ─── Runtime данные (генерируются автоматически) ───
+smart_meme_parser/channel_memory.json
+smart_meme_parser/phash_db.json
+smart_meme_parser/discovered_channels.json
+smart_meme_parser/subs_cache.json
+smart_meme_parser/ignored_channels.json
+smart_meme_parser/channel_cache.json
+
+# ─── Debug скрипты ───
+smart_meme_parser/diag.js
+smart_meme_parser/chk.js
+smart_meme_parser/test_math.js
+
+# ─── Node ───
+node_modules/
+smart_meme_parser/node_modules/
+npm-debug.log*
+
+# ─── OS ───
+.DS_Store
+Thumbs.db

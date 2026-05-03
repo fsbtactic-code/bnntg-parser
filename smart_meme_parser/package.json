@@ -1,0 +1,21 @@
+{
+  "name": "smart_meme_parser",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "better-sqlite3": "^12.9.0",
+    "body-parser": "^2.2.2",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "input": "^1.0.1",
+    "jimp": "^0.16.13",
+    "telegram": "^2.26.22"
+  }
+}
