@@ -134,6 +134,16 @@ async function processChannels(client, saveDiscoveredChannel) {
     const memory = loadMemory(); // Channel Memory EMA
     let processedCount = 0;
     let skippedCount = 0; // каналы без постов за окно
+
+    // ── Статистика прохода ──────────────────────────────────────────────────
+    const stats = {
+        totalPosts: 0,      // всего постов прошло фильтр (react>=3, views>=100)
+        viral: 0,           // квалифицированы RVI>=1.5
+        dupFiltered: 0,     // отфильтрованы анти-баяном
+        forwarded: 0,       // реально переслано
+        // Размеры каналов
+        lt1k: 0, lt5k: 0, lt10k: 0, lt20k: 0, gt20k: 0
+    };
     
     // Временная граница: проверяем посты не старше N часов
     const timeLimitMs = Date.now() - (currentConfig.hoursToCheck * 60 * 60 * 1000);
@@ -261,6 +271,7 @@ async function processChannels(client, saveDiscoveredChannel) {
                             sizeM: scored.sizeM,
                             media: msg.media
                         });
+                        stats.totalPosts++;
                     }
                 }
 
@@ -279,6 +290,16 @@ async function processChannels(client, saveDiscoveredChannel) {
             }
 
             processedCount++;
+
+            // Размер канала для статистики
+            const cData = subsCache[channel];
+            const cSubs = cData ? (typeof cData === 'number' ? cData : (cData.subs || 0)) : 0;
+            if      (cSubs < 1000)  stats.lt1k++;
+            else if (cSubs < 5000)  stats.lt5k++;
+            else if (cSubs < 10000) stats.lt10k++;
+            else if (cSubs < 20000) stats.lt20k++;
+            else                    stats.gt20k++;
+
         } catch (e) {
             console.log(`❌ Ошибка при парсинге ${channel}:`, e.message);
             skippedCount++;
@@ -315,6 +336,7 @@ async function processChannels(client, saveDiscoveredChannel) {
     const qualified = allMemes
         .filter(m => parseFloat(m.rvi) >= MIN_RVI)
         .slice(0, MAX_CANDIDATES);
+    stats.viral = qualified.length;
     console.log(`✅ Квалифицировано (RVI≥${MIN_RVI}): ${qualified.length} из ${allMemes.length}`);
     allMemes.splice(0, allMemes.length, ...qualified);
 
@@ -331,7 +353,8 @@ async function processChannels(client, saveDiscoveredChannel) {
             const isDupe = await isDuplicate(buffer);
             if (isDupe) {
                 console.log(`♻️ БАЯН! Пропускаем: ${meme.channel}/${meme.id} (уже было)`);
-                continue; 
+                stats.dupFiltered++;
+                continue;
             }
 
             console.log(`🚀 ПЕРЕСЫЛАЕМ: @${meme.channel}/${meme.id} (CFS:${meme.vi} RVI:${meme.rvi}x Size:${meme.sizeM}x)`);
@@ -407,6 +430,7 @@ async function processChannels(client, saveDiscoveredChannel) {
             // Сохраняем в базу анти-баяна
             await saveToDatabase(buffer, meme.id, meme.channel);
             forwardedCount++;
+            stats.forwarded++;
 
         } catch (e) {
             console.log(`❌ Ошибка при пересылке:`, e.message);
@@ -416,6 +440,34 @@ async function processChannels(client, saveDiscoveredChannel) {
     const nextIn = Math.round((30 * 60 * 1000 - (Date.now() % (30*60*1000))) / 60000);
     console.log(`\n✅ Итерация завершена. Переслано: ${forwardedCount} мемов.`);
     console.log(`⏰ Следующий прогон через ~30 мин (в ${new Date(Date.now() + 30*60*1000).toLocaleTimeString('ru')})`);
+
+    // ── Итоговый отчёт в канал ───────────────────────────────────────────────
+    const now = new Date();
+    const mskTime = new Date(now.getTime() + 3*3600000 + now.getTimezoneOffset()*60000);
+    const timeStr = mskTime.toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' });
+
+    const report = [
+        `📊 <b>Отчёт прохода ${timeStr} МСК</b>`,
+        ``,
+        `📡 <b>Каналов в базе:</b> ${currentConfig.targetChannels.length}`,
+        `✅ Обработано: ${processedCount}  ·  ❌ Ошибок: ${skippedCount}`,
+        ``,
+        `📏 <b>Размеры каналов:</b>`,
+        `   до 1 000 подп.: ${stats.lt1k}`,
+        `   до 5 000 подп.: ${stats.lt5k}`,
+        `   до 10 000 подп.: ${stats.lt10k}`,
+        `   до 20 000 подп.: ${stats.lt20k}`,
+        `   свыше 20 000: ${stats.gt20k}`,
+        ``,
+        `🔍 <b>Посты:</b>`,
+        `   Найдено (react≥3, views≥100): ${stats.totalPosts}`,
+        `   🔥 Вирусных (RVI≥1.5): ${stats.viral}`,
+        `   ♻️ Баяны: ${stats.dupFiltered}`,
+        `   📤 Опубликовано: ${stats.forwarded}`,
+    ].join('\n');
+
+    await botSendMessage(BOT_CHAT || currentConfig.destinationChannel, report)
+        .catch(e => console.error('Report send error:', e.message));
 
 }
 
