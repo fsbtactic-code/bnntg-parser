@@ -202,8 +202,29 @@ async function processChannels(client, saveDiscoveredChannel) {
                 const srcChat = history.chats && history.chats.find(c =>
                     (c.username || '').toLowerCase() === chName
                 );
-                // srcPeer — объект entity из gramjs (не вызывает ResolveUsername)
-                srcPeer = srcChat || channel;
+                // Строим InputPeerChannel явно — gramjs использует его напрямую без ResolveUsername
+                if (srcChat && srcChat.id != null && srcChat.accessHash != null) {
+                    try {
+                        srcPeer = new Api.InputPeerChannel({
+                            channelId: BigInt(srcChat.id.toString()),
+                            accessHash: BigInt(srcChat.accessHash.toString())
+                        });
+                    } catch(_) { srcPeer = channel; }
+                } else {
+                    // Попытка из entity_cache
+                    const _ck = channel.toLowerCase().replace('@','');
+                    const _ce = entityCache[_ck];
+                    if (_ce && _ce.id && _ce.accessHash) {
+                        try {
+                            srcPeer = new Api.InputPeerChannel({
+                                channelId: BigInt(_ce.id),
+                                accessHash: BigInt(_ce.accessHash)
+                            });
+                        } catch(_) { srcPeer = channel; }
+                    } else {
+                        srcPeer = channel; // последний fallback — вызовет ResolveUsername
+                    }
+                }
 
                 // Подписчики: из history.chats (бесплатно), затем из кэша c rawSubs
                 function parseRawSubs(raw) {
@@ -395,20 +416,33 @@ async function processChannels(client, saveDiscoveredChannel) {
     console.log(`✅ Квалифицировано (RVI≥${MIN_RVI}): ${qualified.length} из ${allMemes.length}`);
     allMemes.splice(0, allMemes.length, ...qualified);
 
-    // Один раз резолвим destination чтобы не вызывать ResolveUsername на каждом форварде
+    // destPeer: сначала из entity_cache, потом единственный resolve через getEntity
     let destPeer = currentConfig.destinationChannel;
-    try {
-        destPeer = await client.getInputEntity(currentConfig.destinationChannel);
-        console.log(`✅ Dest resolved: ${currentConfig.destinationChannel}`);
-    } catch(e) {
-        const numId = process.env.BOT_CHANNEL_ID;
-        if (numId) {
-            try {
-                destPeer = await client.getInputEntity(BigInt(numId.replace('-100','')));
-                console.log(`✅ Dest via numeric ID: ${numId}`);
-            } catch(e2) {
-                console.warn(`⚠️ Dest resolve failed (flood?), using string. ${e.message}`);
+    const _destKey = currentConfig.destinationChannel.replace('@','').toLowerCase();
+    const _destCached = entityCache[_destKey];
+    if (_destCached && _destCached.id && _destCached.accessHash) {
+        try {
+            destPeer = new Api.InputPeerChannel({
+                channelId: BigInt(_destCached.id),
+                accessHash: BigInt(_destCached.accessHash)
+            });
+            console.log(`✅ Dest из кэша: ${currentConfig.destinationChannel}`);
+        } catch(_) {}
+    } else {
+        // Если нет в кэше — резолвим ОДИН РАЗ и сохраняем
+        try {
+            const destEnt = await client.getEntity(currentConfig.destinationChannel);
+            if (destEnt && destEnt.id && destEnt.accessHash != null) {
+                entityCache[_destKey] = { id: destEnt.id.toString(), accessHash: destEnt.accessHash.toString() };
+                saveEntityCache();
+                destPeer = new Api.InputPeerChannel({
+                    channelId: BigInt(destEnt.id.toString()),
+                    accessHash: BigInt(destEnt.accessHash.toString())
+                });
+                console.log(`✅ Dest resolved + закэшировано: ${currentConfig.destinationChannel}`);
             }
+        } catch(e) {
+            console.warn(`⚠️ Dest resolve failed (flood?), используем строку. ${e.message}`);
         }
     }
 
