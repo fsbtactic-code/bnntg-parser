@@ -1,0 +1,9 @@
+{
+  "name": "scheduler-bot",
+  "version": "1.0.0",
+  "description": "Telegram scheduler bot — auto-publish with intervals",
+  "main": "index.js",
+  "dependencies": {
+    "node-telegram-bot-api": "^0.66.0"
+  }
+}
