@@ -778,23 +778,9 @@ async function processChannels(client, saveDiscoveredChannel) {
 
                         // 2. Все каналы где встречалась
                         if (dupe.seenIn && dupe.seenIn.length > 0) {
-                            const all = dupe.seenIn;
-                            let channelLines;
-                            if (all.length <= 15) {
-                                // Все каналы
-                                channelLines = all.map((x, i) =>
-                                    `  ${i + 1}. <a href="https://t.me/${cleanCh(x.channel)}/${x.msgId}">@${cleanCh(x.channel)}</a>`
-                                );
-                            } else {
-                                // Первые 10 + последние 5 (с разделителем)
-                                const first = all.slice(0, 10).map((x, i) =>
-                                    `  ${i + 1}. <a href="https://t.me/${cleanCh(x.channel)}/${x.msgId}">@${cleanCh(x.channel)}</a>`
-                                );
-                                const last = all.slice(-5).map((x, i) =>
-                                    `  ${all.length - 4 + i}. <a href="https://t.me/${cleanCh(x.channel)}/${x.msgId}">@${cleanCh(x.channel)}</a>`
-                                );
-                                channelLines = [...first, `  ... (ещё ${all.length - 15} каналов) ...`, ...last];
-                            }
+                            const channelLines = dupe.seenIn.map((x, i) =>
+                                `  ${i + 1}. <a href="https://t.me/${cleanCh(x.channel)}/${x.msgId}">@${cleanCh(x.channel)}</a>`
+                            );
                             lines.push(`\n🔁 <b>Замечено в ${totalCount} каналах:</b>\n` + channelLines.join('\n'));
                         } else {
                             lines.push(`\n📊 Новых совпадений за проход: ${dupe.hitCount || 1}`);
