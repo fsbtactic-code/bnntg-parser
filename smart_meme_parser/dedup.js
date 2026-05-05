@@ -117,26 +117,44 @@ async function saveToDatabase(imageBuffer, messageId, channelId) {
     }
 }
 
+const REPORT_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24 часа
+
 /**
- * Возвращает топ N самых копируемых мемов (по hitCount) и сбрасывает их счётчик,
- * чтобы в следующем проходе не выдавать те же самые баяны.
+ * Возвращает топ N самых копируемых мемов с учётом 24-часового кулдауна.
+ *
+ * Логика:
+ *  - Если картинка уже была показана менее 24ч назад — пропускаем (даже если hitCount вырос).
+ *  - Если прошло >24ч и картинка снова набрала новые попадания — показываем как новый баян.
+ *  - При выдаче сбрасываем hitCount и ставим lastReportedAt = now.
+ *
  * @param {number} topN
- * @returns {Array} — отсортированный массив записей
+ * @returns {Array} — отсортированный массив записей (только те, что не в кулдауне)
  */
 function getTopDuplicates(topN = 2) {
+    const now = Date.now();
+
     const top = [...hashCache]
-        .filter(e => e.hitCount > 0 && e.channelId && e.messageId)
+        .filter(e => {
+            if (!e.hitCount || e.hitCount <= 0) return false;       // нет новых попаданий
+            if (!e.channelId || !e.messageId) return false;          // нет источника
+            // Пропускаем если показывали менее 24ч назад
+            if (e.lastReportedAt && (now - e.lastReportedAt) < REPORT_COOLDOWN_MS) return false;
+            return true;
+        })
         .sort((a, b) => (b.hitCount || 0) - (a.hitCount || 0))
         .slice(0, topN);
-        
-    // Сбрасываем счётчики у выданных, чтобы не спамить ими постоянно
+
+    // Сбрасываем hitCount и ставим метку времени выдачи
     for (const t of top) {
         const row = hashCache.find(h => h === t);
-        if (row) row.hitCount = 0;
+        if (row) {
+            row.hitCount = 0;
+            row.lastReportedAt = now;
+        }
     }
-    
+
     if (top.length > 0) saveHashes(hashCache);
-    
+
     return top;
 }
 
