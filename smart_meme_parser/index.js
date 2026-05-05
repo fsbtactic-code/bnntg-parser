@@ -173,6 +173,11 @@ async function processChannels(client, saveDiscoveredChannel) {
     // Загружаем кэш подписчиков один раз до цикла
     const cachePath = './channel_cache.json';
     let subsCache = {};
+
+    // Счётчик ошибок каналов (канал удаляется только при 3 ошибках подряд — защита от масс-удаления при крашах)
+    const errPath = './channel_errors.json';
+    let channelErrors = {};
+    try { channelErrors = JSON.parse(fs.readFileSync(errPath, 'utf8')); } catch(_){}
     if (fs.existsSync(cachePath)) {
         try { subsCache = JSON.parse(fs.readFileSync(cachePath, 'utf8')); } catch(e){}
     }
@@ -429,21 +434,34 @@ async function processChannels(client, saveDiscoveredChannel) {
             }
 
             processedCount++;
+            // Успешный парсинг — сбрасываем CHANNEL_INVALID-счётчик для этого канала
+            const _chLowOk = channel.toLowerCase().replace('@', '');
+            if (channelErrors[_chLowOk]) delete channelErrors[_chLowOk];
 
         } catch (e) {
-            // CHANNEL_INVALID = канал закрыт/удалён/сменил юзернейм — убираем из конфига
+            // CHANNEL_INVALID = канал закрыт/удалён/сменил юзернейм.
+            // Удаляем ТОЛЬКО если это произошло 3 раза подряд (защита от масс-удаления при crash-loop)
             if (e.message && e.message.includes('CHANNEL_INVALID')) {
-                console.log(`🗑 Канал @${channel} недоступен (CHANNEL_INVALID) — удаляем из источников`);
-                try {
-                    const cfgPath = path.join(__dirname, '../config.json');
-                    const cfgRaw  = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
-                    const key     = cfgRaw.targetChannels ? 'targetChannels' : 'channels';
-                    const chLow   = channel.toLowerCase().replace('@', '');
-                    cfgRaw[key]   = (cfgRaw[key] || []).filter(c => c.toLowerCase().replace('@','') !== chLow);
-                    fs.writeFileSync(cfgPath, JSON.stringify(cfgRaw, null, 4));
-                } catch (_) {}
+                const chLow = channel.toLowerCase().replace('@', '');
+                channelErrors[chLow] = (channelErrors[chLow] || 0) + 1;
+                const strikes = channelErrors[chLow];
+                if (strikes >= 3) {
+                    console.log(`\uD83D\uDDD1 \u041a\u0430\u043d\u0430\u043b @${channel} \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d 3\u0439 \u043f\u0440\u043e\u0445\u043e\u0434 \u043f\u043e\u0434\u0440\u044f\u0434 — \u0443\u0434\u0430\u043b\u044f\u0435\u043c \u0438\u0437 \u0438\u0441\u0442\u043e\u0447\u043d\u0438\u043a\u043e\u0432`);
+                    try {
+                        const cfgPath = path.join(__dirname, '../config.json');
+                        const cfgRaw  = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+                        const key     = cfgRaw.targetChannels ? 'targetChannels' : 'channels';
+                        cfgRaw[key]   = (cfgRaw[key] || []).filter(c => c.toLowerCase().replace('@','') !== chLow);
+                        fs.writeFileSync(cfgPath, JSON.stringify(cfgRaw, null, 4));
+                        delete channelErrors[chLow]; // сбрасываем счётчик
+                    } catch (_) {}
+                } else {
+                    console.log(`\u26A0\uFE0F @${channel}: CHANNEL_INVALID (\u0441трайк ${strikes}/3)`);
+                }
             } else {
-                console.log(`❌ Ошибка при парсинге ${channel}:`, e.message);
+                // Любая другая ошибка — не считаем страйком, просто логируем
+                console.log(`\u274C \u041e\u0448\u0438\u0431\u043a\u0430 \u043f\u0440\u0438 \u043f\u0430\u0440\u0441\u0438\u043d\u0433\u0435 ${channel}:`, e.message);
+                // Успешный результат сбрасывает CHANNEL_INVALID-счётчик (handled above)
             }
             skippedCount++;
         }
@@ -454,6 +472,8 @@ async function processChannels(client, saveDiscoveredChannel) {
 
     // Сохраняем всю Channel Memory после прохода
     saveMemory(memory);
+    // Сохраняем счётчик ошибок
+    try { fs.writeFileSync(errPath, JSON.stringify(channelErrors)); } catch(_){}
 
     console.log(`\n📊 ИТОГИ ПРОХОДА:`);
     console.log(`   ├─ Всего каналов в конфиге: ${currentConfig.targetChannels.length}`);
