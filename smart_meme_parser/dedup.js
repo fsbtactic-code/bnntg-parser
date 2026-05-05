@@ -135,7 +135,7 @@ function getTopDuplicates(topN = 2) {
 
     const top = [...hashCache]
         .filter(e => {
-            if (!e.hitCount || e.hitCount <= 0) return false;       // нет новых попаданий
+            if (!e.hitCount || e.hitCount < 2) return false;         // минимум 2 копии
             if (!e.channelId || !e.messageId) return false;          // нет источника
             // Пропускаем если показывали менее 24ч назад
             if (e.lastReportedAt && (now - e.lastReportedAt) < REPORT_COOLDOWN_MS) return false;

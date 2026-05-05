@@ -242,7 +242,7 @@ function updateAndGetMomentum(channel, msgId, views, reactions) {
  * @param {number|null} msgId          — ID сообщения (для снепшотов)
  * @returns {{ cfs: number, rvi: number, freshness: number, sizeM: number, momentumR: number, momentumV: number }}
  */
-function calculateVirality(views, reactions, comments, postDateMs, channelMem = null, rawSubs = null, reactionResults = null, channelName = null, msgId = null) {
+function calculateVirality(views, reactions, comments, postDateMs, channelMem = null, rawSubs = null, reactionResults = null, channelName = null, msgId = null, temporalFactor = 1.0) {
     if (!views || views === 0) return { cfs: 0, rvi: 0, freshness: 0, sizeM: 1, momentumR: 0, momentumV: 0 };
 
     let momentumR = 0;
@@ -263,6 +263,10 @@ function calculateVirality(views, reactions, comments, postDateMs, channelMem = 
     const er = (reactions + comments * 1.5 + bayesianC * priorER) / (Math.max(views, 1) + bayesianC);
     
     const velocity = reactions / (ageMin + 5);
+    // Нормализуем velocity по временному фактору:
+    // если сейчас час-пик (tFactor=1.5) — «сырая» velocity завышена, делим на фактор
+    // если ночь (tFactor=0.5) — velocity заниженная, делим и получаем «справедливую» цифру
+    const adjVelocity = velocity / Math.max(temporalFactor, 0.1);
 
     // ── Сигнал комментариев ───────────────────────────────────────────────────
     // Комментарий = более сильный сигнал чем просмотр, добавляем его отдельно
@@ -274,13 +278,14 @@ function calculateVirality(views, reactions, comments, postDateMs, channelMem = 
     let velRatio = 1;
     if (channelMem && channelMem.post_count >= 5) {
         const erRatio  = channelMem.avg_er       > 0 ? er       / channelMem.avg_er       : 1;
-        velRatio = channelMem.avg_velocity  > 0 ? velocity / channelMem.avg_velocity  : 1;
+        // Используем adjVelocity — velocity нормализованная по времени суток
+        velRatio = channelMem.avg_velocity  > 0 ? adjVelocity / channelMem.avg_velocity  : 1;
         // Геометрическое среднее двух аномалий + небольшой вес комментариев
         rvi = Math.sqrt(erRatio * velRatio) * (1 + commentSignal * 0.1);
     } else {
         // Нет достаточной истории — консервативный абсолютный скор
         const erNorm = Math.sqrt(Math.min(er * 100, 9));
-        const velNorm = Math.min(Math.log10(velocity + 1) / Math.log10(10), 1.0);
+        const velNorm = Math.min(Math.log10(adjVelocity + 1) / Math.log10(10), 1.0);
         rvi = Math.min(erNorm * (0.7 + 0.3 * velNorm) * (1 + commentSignal * 0.1), 3.0);
     }
 

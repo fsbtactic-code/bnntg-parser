@@ -14,7 +14,8 @@ const input = require('input');
 const https = require('https');
 const { calculateVirality, calculateMicroVirality, updateMemory, loadMemory, saveMemory, adaptiveThreshold } = require('./virality');
 const { isDuplicate, saveToDatabase, getTopDuplicates, isAlreadyForwarded, getSeenInStats } = require('./dedup');
-const archive = require('./seen_archive'); // бинарный архив уникальных pHash (12 байт/картинка)
+const archive  = require('./seen_archive');    // бинарный архив уникальных pHash (12 байт/картинка)
+const temporal  = require('./temporal_profile'); // временной профиль (часовая/недельная нормализация)
 
 // Защита от падений из-за таймаутов внутри gramjs
 process.on('unhandledRejection', (reason, promise) => {
@@ -337,6 +338,14 @@ async function processChannels(client, saveDiscoveredChannel) {
 
                 stats.totalPostsViewed++;
 
+                // ── Обновляем временной профиль для ВСЕХ постов (и до фильтра) ──
+                // Это критично: нам нужна норма для разного времени, включая обычные посты
+                {
+                    const _ageMin = Math.max((Date.now() - msg.date * 1000) / 60000, 1);
+                    const _vpMin  = views / (_ageMin + 10);
+                    temporal.updateProfile(_vpMin, msg.date * 1000);
+                }
+
                 // Определяем размер канала ДО фильтра — для адаптивных порогов
                 const _chNameF = channel.toLowerCase().replace('@','');
                 const _cachedF = subsCache[_chNameF];
@@ -366,13 +375,17 @@ async function processChannels(client, saveDiscoveredChannel) {
                         let scoredCFS = { cfs: 0, rvi: 0, freshness: 0, sizeM: 1.2, momentumR: 0, momentumV: 0 };
                         let scoredMicro = { mcvi: 0, viewsRatio: 0, erRatio: 0, freshness: 0, momentumV: 0 };
 
+                        // Временной поправочный коэффициент для нормализации velocity
+                        // По мере накопления данных становится точнее (factor=1.0 пока данных мало)
+                        const tFactor = temporal.getTemporalFactor(msg.date * 1000);
+
                         if (isMicroChannel) {
                             // Для микроканалов: оба скора (MCVI — основной, CFS — для совместимости)
-                            scoredMicro = calculateMicroVirality(views, reactions, replies, msg.date * 1000, channelMem, reactionResults, channel, msg.id);
+                            scoredMicro = calculateMicroVirality(views, reactions, replies, msg.date * 1000, channelMem, reactionResults, channel, msg.id, tFactor);
                             // CFS тоже считаем, но с заниженным весом (для сортировки в общем пуле)
-                            scoredCFS = calculateVirality(views, reactions, replies, msg.date * 1000, channelMem, subsRaw, reactionResults, channel, msg.id);
+                            scoredCFS = calculateVirality(views, reactions, replies, msg.date * 1000, channelMem, subsRaw, reactionResults, channel, msg.id, tFactor);
                         } else {
-                            scoredCFS = calculateVirality(views, reactions, replies, msg.date * 1000, channelMem, subsRaw, reactionResults, channel, msg.id);
+                            scoredCFS = calculateVirality(views, reactions, replies, msg.date * 1000, channelMem, subsRaw, reactionResults, channel, msg.id, tFactor);
                         }
 
                         channelMemes.push({
@@ -777,6 +790,11 @@ async function processChannels(client, saveDiscoveredChannel) {
     } catch(e) {
         console.log('⚠️ autoDiscover error:', e.message);
     }
+
+    // Сохраняем временной профиль (накапливается с каждым прогоном)
+    temporal.saveProfile();
+    const tStats = temporal.profileStats();
+    console.log(`⏱ Temporal profile: ${tStats.totalSamples} семплов, активных часов: ${tStats.readyHours}/24, дней: ${tStats.readyDays}/7`);
 
     const _fwdCount = forwardedCount + forwardedSmall + forwardedMomentum + forwardedMicro;
     console.log(`\n✅ Итерация завершена. Переслано: ${_fwdCount} мемов (CFS: ${forwardedCount}, Моментум: ${forwardedMomentum}, Малые: ${forwardedSmall}, Микро: ${forwardedMicro}).`);
