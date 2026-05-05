@@ -15,6 +15,14 @@ const https = require('https');
 const { calculateVirality, updateMemory, loadMemory, saveMemory, adaptiveThreshold } = require('./virality');
 const { isDuplicate, saveToDatabase, getTopDuplicates, isAlreadyForwarded } = require('./dedup');
 
+// Защита от падений из-за таймаутов внутри gramjs
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection:', reason);
+});
+process.on('uncaughtException', (err) => {
+    console.error('Uncaught Exception:', err);
+});
+
 // ─── Bot API helper ─────────────────────────────────────────────────────────
 const BOT_TOKEN  = process.env.BOT_TOKEN;
 const BOT_CHAT   = process.env.BOT_CHANNEL_ID; // -1003958213144
@@ -519,7 +527,7 @@ async function processChannels(client, saveDiscoveredChannel) {
             const buffer = await client.downloadMedia(meme.media, { thumb: 1 });
             if (!buffer) continue; 
 
-            const isDupe = await isDuplicate(buffer);
+            const isDupe = await isDuplicate(buffer, meme.channel, meme.id);
             if (isDupe) {
                 console.log(`♻️ БАЯН! Пропускаем: ${meme.channel}/${meme.id} (уже было)`);
                 stats.dupFiltered++;
@@ -715,12 +723,19 @@ async function processChannels(client, saveDiscoveredChannel) {
                             dropAuthor: false, dropMediaCaptions: false, noforwards: false,
                         }));
                         // Подпись: Самая копируемая картинка + список каналов
-                        const seenLinks = (dupe.seenIn && dupe.seenIn.length > 0)
-                            ? dupe.seenIn.map(x => '  • <a href="https://t.me/' + x.channel + '/' + x.msgId + '">' + x.channel + '</a>').join('\n')
-                            : '  • @' + dupe.channelId;
+                        let seenLinks = '';
+                        if (dupe.channelId && dupe.messageId) {
+                            seenLinks += `🔹 <b>Первое появление:</b> <a href="https://t.me/${dupe.channelId}/${dupe.messageId}">@${dupe.channelId}</a>\n`;
+                        }
+                        if (dupe.seenIn && dupe.seenIn.length > 0) {
+                            seenLinks += `🔁 <b>Также замечено в:</b>\n`;
+                            seenLinks += dupe.seenIn.map(x => '  • <a href="https://t.me/' + x.channel + '/' + x.msgId + '">@' + x.channel + '</a>').join('\n');
+                        } else if (!dupe.channelId) {
+                            seenLinks = '  • Нет данных об источнике';
+                        }
                         await botSendMessage(
                             BOT_CHAT || currentConfig.destinationChannel,
-                            '🖼 <b>Самая копируемая картинка</b> — встречалась в каналах:\n' + seenLinks
+                            '🖼 <b>Самая копируемая картинка</b>\n\n' + seenLinks
                         ).catch(() => {});
                         await new Promise(r => setTimeout(r, 1000));
                     } catch(e) {

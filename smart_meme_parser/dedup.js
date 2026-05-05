@@ -57,7 +57,7 @@ function hammingDistance(h1, h2) {
  * @param {number} threshold  — допустимая разница (default 5, т.е. схожесть >92%)
  * @returns {object|false} — matched entry (с channel/messageId/hitCount) или false
  */
-async function isDuplicate(imageBuffer, threshold = 5) {
+async function isDuplicate(imageBuffer, channel = null, msgId = null, threshold = 5) {
     try {
         // Для видео (mp4) Jimp не работает — пропускаем pHash, опираемся на ID-дедуп
         const isVideo = imageBuffer.length > 4 &&
@@ -70,6 +70,16 @@ async function isDuplicate(imageBuffer, threshold = 5) {
             if (row.hash && hammingDistance(newHash, row.hash) <= threshold) {
                 // Инкрементируем счётчик попаданий и сохраняем
                 row.hitCount = (row.hitCount || 0) + 1;
+                
+                if (channel && msgId) {
+                    row.seenIn = row.seenIn || [];
+                    if (!row.seenIn.some(x => x.channel === channel && x.msgId === msgId)) {
+                        row.seenIn.push({ channel, msgId });
+                        // Ограничиваем историю 20 последними каналами, чтобы не раздувать базу
+                        if (row.seenIn.length > 20) row.seenIn.shift();
+                    }
+                }
+                
                 saveHashes(hashCache);
                 return row; // возвращаем matched entry с channel/messageId/hitCount
             }
