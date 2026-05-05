@@ -135,7 +135,7 @@ function getTopDuplicates(topN = 2) {
 
     const top = [...hashCache]
         .filter(e => {
-            if (!e.hitCount || e.hitCount < 2) return false;         // минимум 2 копии
+            if (!e.hitCount || e.hitCount < 3) return false;         // минимум 3 копии
             if (!e.channelId || !e.messageId) return false;          // нет источника
             // Пропускаем если показывали менее 24ч назад
             if (e.lastReportedAt && (now - e.lastReportedAt) < REPORT_COOLDOWN_MS) return false;
@@ -144,8 +144,12 @@ function getTopDuplicates(topN = 2) {
         .sort((a, b) => (b.hitCount || 0) - (a.hitCount || 0))
         .slice(0, topN);
 
-    // Сбрасываем hitCount и ставим метку времени выдачи
+    // Сбрасываем hitCount и ставим метку времени выдачи, возвращаем КОПИИ для отчета
+    const result = [];
     for (const t of top) {
+        // Создаем копию состояния ДО сброса для возврата в index.js
+        result.push(JSON.parse(JSON.stringify(t)));
+        
         const row = hashCache.find(h => h === t);
         if (row) {
             row.hitCount = 0;
@@ -155,7 +159,7 @@ function getTopDuplicates(topN = 2) {
 
     if (top.length > 0) saveHashes(hashCache);
 
-    return top;
+    return result;
 }
 
 const FORWARD_BLOCK_MS = 48 * 60 * 60 * 1000; // 48 часов
