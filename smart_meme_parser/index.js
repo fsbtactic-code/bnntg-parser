@@ -416,15 +416,19 @@ async function processChannels(client, saveDiscoveredChannel) {
     // Сортируем по Composite Final Score
     allMemes.sort((a, b) => b.vi - a.vi);
 
-    console.log('🔥 ТОП-10 (CFS · RVI · Size · Freshness):');
+    console.log('🔥 ТОП-10 (CFS · RVI · Size · Freshness · Momentum):');
     allMemes.slice(0, 10).forEach((m, i) => {
-        console.log(`  ${i+1}. [@${m.channel}] CFS:${m.vi} RVI:${m.rvi}x Size:${m.sizeM}x Fresh:${m.freshness} React:${m.reactions}`);
+        const momStr = (m.momentumR > 0 || m.momentumV > 0) ? ` Mom:${m.momentumR}r/min` : '';
+        console.log(`  ${i+1}. [@${m.channel}] CFS:${m.vi} RVI:${m.rvi}x Size:${m.sizeM}x Fresh:${m.freshness}${momStr} React:${m.reactions}`);
     });
 
+    // Сохраняем сырой пул (до RVI-фильтра) для очереди малых каналов
+    // Малые каналы могут иметь меньший RVI (нет накопленной памяти), но всё равно ценны
+    const allMemesRaw = [...allMemes];
+
     // Берём топ кандидатов: сортируем по CFS, отсекаем откровенно слабые (RVI < 1.5)
-    // Без зависимости от «среднего» — берём реальные аномалии
-    const MIN_RVI = 1.5; // минимальная аномалия для публикации
-    const MAX_CANDIDATES = (config.maxMemesToForward || 5) * 3; // пул в 3× больше нужного
+    const MIN_RVI = 1.5;
+    const MAX_CANDIDATES = (config.maxMemesToForward || 5) * 3;
     const qualified = allMemes
         .filter(m => parseFloat(m.rvi) >= MIN_RVI)
         .slice(0, MAX_CANDIDATES);
@@ -487,30 +491,35 @@ async function processChannels(client, saveDiscoveredChannel) {
     let forwardedSmall = 0;
 
     if (!floodBanActive) {
-    // 1. Старый формат: топ 5 по CFS (из тех, что отфильтрованы по MIN_RVI в qualified)
+    // 1. CFS: топ 5 по Composite Final Score
     const MAX_OLD = 5;
     const oldQueue = allMemes.slice(0, MAX_OLD).map(m => ({ ...m, _slot: 'main' }));
     const mainIds = new Set(oldQueue.map(m => m.channel + '/' + m.id));
 
-    // 2. Новый формат: "Гравитационный моментум"
-    // Ищем посты, которые быстро растут прямо сейчас
+    // 2. Моментум: посты с наибольшей динамикой роста прямо сейчас
+    // БАГ-ФИКС: убираем фильтр > 0 — на первых проходах у всех постов momentumR=0
+    // Сортируем по суммарной скорости, лучшие не из top-5 идут в momentum-слот
     const MAX_MOMENTUM = (config.maxMemesToForward || 15) - MAX_OLD;
     const momentumQueue = [...allMemes]
         .filter(m => !mainIds.has(m.channel + '/' + m.id))
-        .filter(m => m.momentumR > 0 || m.momentumV > 0) // Есть хоть какая-то динамика
-        .sort((a, b) => b.momentumR - a.momentumR) // Сортируем по скорости набора реакций
+        .sort((a, b) => (b.momentumR + b.momentumV) - (a.momentumR + a.momentumV) || b.vi - a.vi)
         .slice(0, MAX_MOMENTUM)
         .map(m => ({ ...m, _slot: 'momentum' }));
     
+    const momentumActive = momentumQueue.filter(m => m.momentumR > 0 || m.momentumV > 0).length;
+    console.log(`📈 Momentum-очередь: ${momentumQueue.length} постов (${momentumActive} с активной динамикой)`);
     for (let m of momentumQueue) mainIds.add(m.channel + '/' + m.id);
 
-    // 3. Малые каналы: из ОСТАТКА
+    // 3. Малые каналы: берём из СЫРОГО пула (до RVI-фильтра)
+    // У малых каналов может не быть достаточной истории для высокого RVI
     const MAX_SMALL = config.maxSmallChannelMemes || 5;
-    const smallQueue = allMemes
+    const smallQueue = allMemesRaw
         .filter(m => m.isSmall && !mainIds.has(m.channel + '/' + m.id))
+        .sort((a, b) => b.vi - a.vi)
         .slice(0, MAX_SMALL)
         .map(m => ({ ...m, _slot: 'small' }));
 
+    console.log(`📊 Очереди: CFS=${oldQueue.length} Momentum=${momentumQueue.length} Small=${smallQueue.length}`);
     const forwardQueue = [...oldQueue, ...momentumQueue, ...smallQueue];
 
     for (let meme of forwardQueue) {
@@ -531,20 +540,8 @@ async function processChannels(client, saveDiscoveredChannel) {
 
             const isDupe = await isDuplicate(buffer, meme.channel, meme.id);
             if (isDupe) {
-                console.log(`♻️ БАЯН! Пропускаем: ${meme.channel}/${meme.id} (уже было)`);
+                console.log(`♻️ БАЯН! @${meme.channel}/${meme.id} ← оригинал: @${isDupe.channelId}/${isDupe.messageId} (hitCount:${isDupe.hitCount})`);
                 stats.dupFiltered++;
-                // Трекаем копируемые мемы — сохраняем ВСЕ каналы где встречалась картинка
-                if (isDupe.channelId && isDupe.messageId) {
-                    const key = `${isDupe.channelId}:${isDupe.messageId}`;
-                    let entry = dupHits.find(d => d.key === key);
-                    if (!entry) {
-                        entry = { key, channelId: isDupe.channelId, messageId: isDupe.messageId, hitCount: isDupe.hitCount || 1, seenIn: [] };
-                        dupHits.push(entry);
-                    }
-                    // Добавляем текущий канал-дубликат в список
-                    entry.seenIn.push({ channel: meme.channel, msgId: meme.id });
-                    entry.hitCount = isDupe.hitCount || entry.seenIn.length;
-                }
                 continue;
             }
 
@@ -725,19 +722,22 @@ async function processChannels(client, saveDiscoveredChannel) {
                             dropAuthor: false, dropMediaCaptions: false, noforwards: false,
                         }));
                         // Подпись: Самая копируемая картинка + список каналов
+                        // Убираем @ из имени канала для корректных URL (t.me не любит @)
+                        const cleanCh = (ch) => String(ch || '').replace('@', '');
                         let seenLinks = '';
                         if (dupe.channelId && dupe.messageId) {
-                            seenLinks += `🔹 <b>Первое появление:</b> <a href="https://t.me/${dupe.channelId}/${dupe.messageId}">@${dupe.channelId}</a>\n`;
+                            seenLinks += `🔹 <b>Первое появление:</b> <a href="https://t.me/${cleanCh(dupe.channelId)}/${dupe.messageId}">@${cleanCh(dupe.channelId)}</a>\n`;
                         }
                         if (dupe.seenIn && dupe.seenIn.length > 0) {
-                            seenLinks += `🔁 <b>Также замечено в:</b>\n`;
-                            seenLinks += dupe.seenIn.map(x => '  • <a href="https://t.me/' + x.channel + '/' + x.msgId + '">@' + x.channel + '</a>').join('\n');
-                        } else if (!dupe.channelId) {
-                            seenLinks = '  • Нет данных об источнике';
+                            seenLinks += `🔁 <b>Также замечено (${dupe.seenIn.length} раз):</b>\n`;
+                            seenLinks += dupe.seenIn.slice(-10).map(x => 
+                                `  • <a href="https://t.me/${cleanCh(x.channel)}/${x.msgId}">@${cleanCh(x.channel)}</a>`
+                            ).join('\n');
                         }
+                        const caption = seenLinks || '  • Нет данных об источнике';
                         await botSendMessage(
                             BOT_CHAT || currentConfig.destinationChannel,
-                            '🖼 <b>Самая копируемая картинка</b>\n\n' + seenLinks
+                            `🖼 <b>Самая копируемая картинка</b> (×${dupe.hitCount || '?'})\n\n` + caption
                         ).catch(() => {});
                         await new Promise(r => setTimeout(r, 1000));
                     } catch(e) {

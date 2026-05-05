@@ -106,10 +106,12 @@ function parseSubs(raw) {
  * @returns {number}
  */
 function sizeMultiplier(subscribers) {
-    const subs = subscribers || 10_000; // нет данных → нейтраль
-    const clamped = Math.max(subs, 100);
+    // null/undefined → канал неизвестный размер. Даём лёгкий бонус (×1.2)
+    // т.к. неизвестные каналы скорее малые чем крупные
+    if (!subscribers) return 1.2;
+    const clamped = Math.max(subscribers, 100);
     const m = 1 + Math.log10(Math.max(10_000 / clamped, 1)) * 0.5;
-    return Math.max(m, 0.1); // нижний порог 0.1
+    return Math.max(m, 0.1);
 }
 
 /**
@@ -124,9 +126,8 @@ function sizeMultiplier(subscribers) {
 function freshnessFactor(postDateMs, velRatio = 1) {
     const ageMin = Math.max((Date.now() - postDateMs) / 60000, 0);
     // Гравитационная свежесть: замедляем время для "горячих" постов
-    // log2(velRatio) дает +1 при velRatio=2, +2 при velRatio=4. 
-    // Максимальное замедление времени в 4 раза (при velRatio>=16).
-    const momentumBonus = Math.max(0, Math.min(3, Math.log2(Math.max(1, velRatio))));
+    // Кап momentumBonus=2 чтобы не дублировать бонус с RVI в CFS
+    const momentumBonus = Math.max(0, Math.min(2, Math.log2(Math.max(1, velRatio))));
     const effectiveAgeMin = ageMin / (1 + momentumBonus);
     return Math.exp(-effectiveAgeMin / 60);
 }
@@ -254,47 +255,53 @@ function calculateVirality(views, reactions, comments, postDateMs, channelMem = 
 
     const ageMin   = Math.max((Date.now() - postDateMs) / 60000, 0.5);
     
-    // ── Bayesian ER ───────────────────────────────────────────────────────
-    // Добавляем виртуальные просмотры для сглаживания "проблемы малых чисел"
-    const bayesianC = 100; // вес сглаживания
+    // ── Адаптивное байесовское сглаживание ───────────────────────────────────
+    // bayesianC зависит от размера канала: маленький пул → сильнее сглаживаем
+    // Для 1000 просмотров: C=50 (почти не влияет). Для 100 просмотров: C=200 (умеренно).
+    const bayesianC = Math.round(5000 / Math.max(views, 50));
     const priorER = (channelMem && channelMem.avg_er > 0) ? channelMem.avg_er : 0.03;
     const er = (reactions + comments * 1.5 + bayesianC * priorER) / (Math.max(views, 1) + bayesianC);
     
-    const velocity = reactions / (ageMin + 5); // +5 мин защита от деления на ноль
+    const velocity = reactions / (ageMin + 5);
 
-    // ── RVI ───────────────────────────────────────────────────────────────
+    // ── Сигнал комментариев ───────────────────────────────────────────────────
+    // Комментарий = более сильный сигнал чем просмотр, добавляем его отдельно
+    // Нормализуем: много комментариев при малых просмотрах → высокий сигнал
+    const commentSignal = Math.log1p(comments) / Math.log1p(Math.max(views / 100, 1));
+
+    // ── RVI ───────────────────────────────────────────────────────────────────
     let rvi;
     let velRatio = 1;
     if (channelMem && channelMem.post_count >= 5) {
-        // У канала достаточно истории (≥5 постов) — считаем реальную аномалию
         const erRatio  = channelMem.avg_er       > 0 ? er       / channelMem.avg_er       : 1;
         velRatio = channelMem.avg_velocity  > 0 ? velocity / channelMem.avg_velocity  : 1;
-        // Геометрическое среднее двух аномалий (устойчивее к выбросам)
-        rvi = Math.sqrt(erRatio * velRatio);
+        // Геометрическое среднее двух аномалий + небольшой вес комментариев
+        rvi = Math.sqrt(erRatio * velRatio) * (1 + commentSignal * 0.1);
     } else {
         // Нет достаточной истории — консервативный абсолютный скор
-        const erNorm = Math.sqrt(Math.min(er * 100, 9)); // max 3.0 при er≥9%
+        const erNorm = Math.sqrt(Math.min(er * 100, 9));
         const velNorm = Math.min(Math.log10(velocity + 1) / Math.log10(10), 1.0);
-        rvi = Math.min(erNorm * (0.7 + 0.3 * velNorm), 3.0); // жёсткий кап 3.0 при нет истории
+        rvi = Math.min(erNorm * (0.7 + 0.3 * velNorm) * (1 + commentSignal * 0.1), 3.0);
     }
 
-    // Внедряем моментум в velRatio для гравитационной свежести!
-    // Если мгновенная скорость больше средней за все время, используем мгновенную
+    // Моментум в velRatio для гравитационной свежести
+    // Если мгновенная скорость больше средней — используем мгновенную
     if (channelMem && channelMem.avg_velocity > 0 && momentumR > velocity) {
         velRatio = Math.max(velRatio, momentumR / channelMem.avg_velocity);
     }
 
-    // ── Size ──────────────────────────────────────────────────────────────
+    // ── Size ──────────────────────────────────────────────────────────────────
     const subs = parseSubs(rawSubs);
     const sizeM = sizeMultiplier(subs);
 
-    // ── Freshness ─────────────────────────────────────────────────────────
+    // ── Freshness ─────────────────────────────────────────────────────────────
     const fresh = freshnessFactor(postDateMs, velRatio);
 
-    // ── Reaction Diversity ────────────────────────────────────────────────
+    // ── Reaction Diversity ────────────────────────────────────────────────────
     const divBonus = reactionDiversityBonus(reactionResults);
 
-    // ── Composite Final Score ─────────────────────────────────────────────
+    // ── Composite Final Score ─────────────────────────────────────────────────
+    // CFS = RVI × sizeM × freshness × diversityBonus
     const cfs = rvi * sizeM * fresh * divBonus * 10_000;
 
     return {
