@@ -481,6 +481,11 @@ async function processChannels(client, saveDiscoveredChannel) {
         } catch(_) {}
     }
 
+    // Объявляем счётчики ДО проверки flood ban — иначе в итоговом отчёте будет ReferenceError
+    let forwardedCount = 0;
+    let forwardedMomentum = 0;
+    let forwardedSmall = 0;
+
     if (!floodBanActive) {
     // 1. Старый формат: топ 5 по CFS (из тех, что отфильтрованы по MIN_RVI в qualified)
     const MAX_OLD = 5;
@@ -507,9 +512,6 @@ async function processChannels(client, saveDiscoveredChannel) {
         .map(m => ({ ...m, _slot: 'small' }));
 
     const forwardQueue = [...oldQueue, ...momentumQueue, ...smallQueue];
-    let forwardedCount = 0;
-    let forwardedMomentum = 0;
-    let forwardedSmall = 0;
 
     for (let meme of forwardQueue) {
         if (meme._slot === 'main' && forwardedCount >= MAX_OLD) continue;
@@ -657,8 +659,8 @@ async function processChannels(client, saveDiscoveredChannel) {
     } // end if (!floodBanActive)
 
     saveEntityCache(); // Сохраняем все накопленные entities
-    const _fwdCount = (typeof forwardedCount !== 'undefined') ? (forwardedCount + forwardedSmall + forwardedMomentum) : 0;
-    console.log(`\n✅ Итерация завершена. Переслано: ${floodBanActive ? 0 : _fwdCount} мемов (Старый: ${typeof forwardedCount !== 'undefined' ? forwardedCount : 0}, Моментум: ${typeof forwardedMomentum !== 'undefined' ? forwardedMomentum : 0}, Малые: ${typeof forwardedSmall !== 'undefined' ? forwardedSmall : 0}).`);
+    const _fwdCount = forwardedCount + forwardedSmall + forwardedMomentum;
+    console.log(`\n✅ Итерация завершена. Переслано: ${_fwdCount} мемов (CFS: ${forwardedCount}, Моментум: ${forwardedMomentum}, Малые: ${forwardedSmall}).`);
     console.log(`⏰ Следующий прогон через ~30 мин (в ${new Date(Date.now() + 30*60*1000).toLocaleTimeString('ru')})`);
 
     // ── Итоговый отчёт в канал ───────────────────────────────────────────────
