@@ -431,7 +431,20 @@ async function processChannels(client, saveDiscoveredChannel) {
             processedCount++;
 
         } catch (e) {
-            console.log(`❌ Ошибка при парсинге ${channel}:`, e.message);
+            // CHANNEL_INVALID = канал закрыт/удалён/сменил юзернейм — убираем из конфига
+            if (e.message && e.message.includes('CHANNEL_INVALID')) {
+                console.log(`🗑 Канал @${channel} недоступен (CHANNEL_INVALID) — удаляем из источников`);
+                try {
+                    const cfgPath = path.join(__dirname, '../config.json');
+                    const cfgRaw  = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+                    const key     = cfgRaw.targetChannels ? 'targetChannels' : 'channels';
+                    const chLow   = channel.toLowerCase().replace('@', '');
+                    cfgRaw[key]   = (cfgRaw[key] || []).filter(c => c.toLowerCase().replace('@','') !== chLow);
+                    fs.writeFileSync(cfgPath, JSON.stringify(cfgRaw, null, 4));
+                } catch (_) {}
+            } else {
+                console.log(`❌ Ошибка при парсинге ${channel}:`, e.message);
+            }
             skippedCount++;
         }
         
