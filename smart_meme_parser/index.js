@@ -14,6 +14,7 @@ const input = require('input');
 const https = require('https');
 const { calculateVirality, calculateMicroVirality, updateMemory, loadMemory, saveMemory, adaptiveThreshold } = require('./virality');
 const { isDuplicate, saveToDatabase, getTopDuplicates, isAlreadyForwarded } = require('./dedup');
+const archive = require('./seen_archive'); // бинарный архив уникальных pHash (12 байт/картинка)
 
 // Защита от падений из-за таймаутов внутри gramjs
 process.on('unhandledRejection', (reason, promise) => {
@@ -578,8 +579,23 @@ async function processChannels(client, saveDiscoveredChannel) {
             const isDupe = await isDuplicate(buffer, meme.channel, meme.id);
             if (isDupe) {
                 console.log(`♻️ БАЯН! @${meme.channel}/${meme.id} ← оригинал: @${isDupe.channelId}/${isDupe.messageId} (hitCount:${isDupe.hitCount})`);
+                // Фиксируем картинку в архиве даже если это баян — чтобы знать когда впервые встретилась
+                archive.checkAndRecord(buffer).catch(() => {});
                 stats.dupFiltered++;
                 continue;
+            }
+
+            // ── Архивная проверка: фильтр по возрасту картинки ────────────────────
+            // Если config.archiveFilterDays > 0 — отсеиваем мемы старше N дней
+            // (картинка уже циркулировала в рунете давно → не свежий контент)
+            const archiveFilterDays = currentConfig.archiveFilterDays || 0;
+            if (archiveFilterDays > 0) {
+                const archCheck = await archive.checkAndRecord(buffer).catch(() => ({ isNew: true }));
+                if (!archCheck.isNew && archCheck.firstSeenDaysAgo >= archiveFilterDays) {
+                    console.log(`🗓 Старый мем (${archCheck.firstSeenDaysAgo}д в архиве): @${meme.channel}/${meme.id} — пропуск`);
+                    stats.dupFiltered++;
+                    continue;
+                }
             }
 
             console.log(`🚀 ПЕРЕСЫЛАЕМ: @${meme.channel}/${meme.id} (CFS:${meme.vi} RVI:${meme.rvi}x Size:${meme.sizeM}x)`);
@@ -680,8 +696,12 @@ async function processChannels(client, saveDiscoveredChannel) {
             if (botRes && !botRes.ok) console.log(`   ⚠️ Bot API: ${botRes.description}`);
             else if (botRes && botRes.ok) console.log(`   📊 Статистика отправлена.`);
 
-            // Сохраняем в базу анти-баяна
+            // Сохраняем в базу анти-баяна и в бинарный архив
             await saveToDatabase(buffer, meme.id, meme.channel);
+            // Если archiveFilterDays=0, запись в архив ещё не была сделана выше — делаем сейчас
+            if (!(currentConfig.archiveFilterDays > 0)) {
+                archive.checkAndRecord(buffer).catch(() => {});
+            }
             if (meme._slot === 'small')    forwardedSmall++;
             else if (meme._slot === 'momentum') forwardedMomentum++;
             else if (meme._slot === 'micro')    forwardedMicro++;
