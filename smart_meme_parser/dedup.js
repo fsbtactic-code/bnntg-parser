@@ -175,4 +175,21 @@ function isAlreadyForwarded(channelId, messageId) {
     );
 }
 
-module.exports = { isDuplicate, saveToDatabase, getTopDuplicates, isAlreadyForwarded };
+/**
+ * Подсчитывает сколько раз каждый канал встречался в seenIn всех записей.
+ * Используется для авто-добавления активных мем-каналов в источники.
+ * @returns {{ [channelName: string]: number }}
+ */
+function getSeenInStats() {
+    const stats = {};
+    for (const entry of hashCache) {
+        if (!entry.seenIn || !Array.isArray(entry.seenIn)) continue;
+        for (const seen of entry.seenIn) {
+            const ch = String(seen.channel || '').toLowerCase().replace('@', '').trim();
+            if (ch) stats[ch] = (stats[ch] || 0) + 1;
+        }
+    }
+    return stats;
+}
+
+module.exports = { isDuplicate, saveToDatabase, getTopDuplicates, isAlreadyForwarded, getSeenInStats };

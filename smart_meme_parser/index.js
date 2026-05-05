@@ -13,7 +13,7 @@ const { StringSession } = require('telegram/sessions');
 const input = require('input');
 const https = require('https');
 const { calculateVirality, calculateMicroVirality, updateMemory, loadMemory, saveMemory, adaptiveThreshold } = require('./virality');
-const { isDuplicate, saveToDatabase, getTopDuplicates, isAlreadyForwarded } = require('./dedup');
+const { isDuplicate, saveToDatabase, getTopDuplicates, isAlreadyForwarded, getSeenInStats } = require('./dedup');
 const archive = require('./seen_archive'); // бинарный архив уникальных pHash (12 байт/картинка)
 
 // Защита от падений из-за таймаутов внутри gramjs
@@ -716,7 +716,68 @@ async function processChannels(client, saveDiscoveredChannel) {
 
     } // end if (!floodBanActive)
 
-    saveEntityCache(); // Сохраняем все накопленные entities
+    saveEntityCache();
+
+    // ── Авто-добавление мем-каналов из seenIn ────────────────────────────────
+    // Каналы которые скопировали наши мемы 2+ раз, соответствуют критериям мем-канала
+    // и ещё не отслеживаются — автоматически добавляются в список источников
+    try {
+        const seenStats   = getSeenInStats(); // { channel: hitCount }
+        const CONFIG_PATH = path.join(__dirname, '../config.json');
+        const cfgRaw      = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+        // Нормализуем текущий список каналов в нижний регистр без @
+        const existingSet = new Set(
+            (cfgRaw.targetChannels || cfgRaw.channels || []).map(c => c.toLowerCase().replace('@','').trim())
+        );
+        const destChannels = new Set(
+            [cfgRaw.destinationChannel, ...(cfgRaw.destinationChannels || [])]
+                .filter(Boolean).map(c => c.toLowerCase().replace('@',''))
+        );
+
+        const autoAdded = [];
+        for (const [ch, hits] of Object.entries(seenStats)) {
+            if (hits < 2)                  continue; // менее 2 репостов
+            if (existingSet.has(ch))       continue; // уже в списке
+            if (destChannels.has(ch))      continue; // это наш канал-назначение
+
+            // Проверяем «mem» / «мем» в username
+            const inUsername = /mem|мем/i.test(ch);
+
+            // Проверяем в title из entityCache
+            const entityEntry = entityCache[ch] || entityCache['@' + ch];
+            const title       = (entityEntry && entityEntry.title) ? entityEntry.title : '';
+            const inTitle     = /mem|мем/i.test(title);
+
+            // Проверяем в описании канала из subsCache
+            const scEntry = subsCache[ch];
+            const desc    = (scEntry && scEntry.desc) ? scEntry.desc : '';
+            const inDesc  = /mem|мем/i.test(desc);
+
+            if (!inUsername && !inTitle && !inDesc) continue;
+
+            // Проверяем диапазон подписчиков: 100–10 000
+            const subs = !scEntry ? 0
+                : (typeof scEntry === 'number' ? scEntry
+                : (scEntry.subs > 0 ? scEntry.subs : parseRawSubs(scEntry.rawSubs)));
+            if (subs < 100 || subs > 10000) continue;
+
+            // Все критерии выполнены — добавляем
+            existingSet.add(ch);
+            // Добавляем в тот же массив что уже используется
+            if (cfgRaw.targetChannels) cfgRaw.targetChannels.push(ch);
+            else if (cfgRaw.channels)  cfgRaw.channels.push(ch);
+            autoAdded.push(`@${ch} (${subs} подп., репостов: ${hits}${inTitle ? ', title:"'+title+'"' : ''})`);
+        }
+
+        if (autoAdded.length > 0) {
+            fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfgRaw, null, 4));
+            console.log(`\n🤖 Авто-добавлено ${autoAdded.length} мем-канал(ов) в источники:`);
+            autoAdded.forEach(x => console.log('  ✚ ' + x));
+        }
+    } catch(e) {
+        console.log('⚠️ autoDiscover error:', e.message);
+    }
+
     const _fwdCount = forwardedCount + forwardedSmall + forwardedMomentum + forwardedMicro;
     console.log(`\n✅ Итерация завершена. Переслано: ${_fwdCount} мемов (CFS: ${forwardedCount}, Моментум: ${forwardedMomentum}, Малые: ${forwardedSmall}, Микро: ${forwardedMicro}).`);
     console.log(`⏰ Следующий прогон через ~30 мин (в ${new Date(Date.now() + 30*60*1000).toLocaleTimeString('ru')})`);
