@@ -184,6 +184,7 @@ function archiveStats() {
 
 // Инициализируем при загрузке модуля
 loadArchive();
-cleanupArchive(30); // держим 30 дней истории
+// Автоочистка ОТКЛЮЧЕНА — архив хранит всю историю навсегда.
+// Для ручной очистки: require('./seen_archive').cleanupArchive(30)
 
 module.exports = { checkAndRecord, cleanupArchive, archiveStats };
