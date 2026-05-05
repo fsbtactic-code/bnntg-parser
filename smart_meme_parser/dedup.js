@@ -158,12 +158,21 @@ function getTopDuplicates(topN = 2) {
     return top;
 }
 
+const FORWARD_BLOCK_MS = 48 * 60 * 60 * 1000; // 48 часов
+
 /**
- * Проверяет, был ли пост уже переслан (по channel+messageId).
+ * Проверяет, был ли пост уже переслан (по channel+messageId) за последние 48ч.
  * Быстрая проверка без pHash — до downloadMedia.
+ * Старые записи (>48ч) не блокируют — иначе популярные каналы вечно в бане.
+ * pHash-дедупликация в isDuplicate() защищает от повторных картинок независимо.
  */
 function isAlreadyForwarded(channelId, messageId) {
-    return hashCache.some(h => h.channelId === String(channelId) && h.messageId === String(messageId));
+    const cutoff = Date.now() - FORWARD_BLOCK_MS;
+    return hashCache.some(h =>
+        h.channelId === String(channelId) &&
+        h.messageId === String(messageId) &&
+        (h.ts || 0) >= cutoff
+    );
 }
 
 module.exports = { isDuplicate, saveToDatabase, getTopDuplicates, isAlreadyForwarded };
