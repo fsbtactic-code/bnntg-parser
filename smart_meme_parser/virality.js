@@ -113,20 +113,22 @@ function sizeMultiplier(subscribers) {
 }
 
 /**
- * Экспоненциальное затухание свежести.
+ * Экспоненциальное затухание свежести с учетом моментума.
  * Период полураспада ≈ 42 минуты (при τ=60).
- *
- * 5 мин  → 0.92
- * 15 мин → 0.78
- * 30 мин → 0.61  ← наш 30-минутный порог
- * 60 мин → 0.37
+ * Теперь старение замедляется, если пост обладает аномальной скоростью (velRatio).
  *
  * @param {number} postDateMs
+ * @param {number} velRatio - Отношение текущей скорости к средней по каналу
  * @returns {number} [0..1]
  */
-function freshnessFactor(postDateMs) {
-    const ageMin = (Date.now() - postDateMs) / 60000;
-    return Math.exp(-ageMin / 60);
+function freshnessFactor(postDateMs, velRatio = 1) {
+    const ageMin = Math.max((Date.now() - postDateMs) / 60000, 0);
+    // Гравитационная свежесть: замедляем время для "горячих" постов
+    // log2(velRatio) дает +1 при velRatio=2, +2 при velRatio=4. 
+    // Максимальное замедление времени в 4 раза (при velRatio>=16).
+    const momentumBonus = Math.max(0, Math.min(3, Math.log2(Math.max(1, velRatio))));
+    const effectiveAgeMin = ageMin / (1 + momentumBonus);
+    return Math.exp(-effectiveAgeMin / 60);
 }
 
 /**
@@ -143,16 +145,90 @@ function reactionDiversityBonus(reactionResults) {
     return Math.min(1 + (activeTypes - 1) * 0.08, 1.5);
 }
 
+// ─── Post Snapshots (Dynamic Virality) ───────────────────────────────────────
+const SNAPSHOTS_PATH = './post_snapshots.json';
+
+function loadSnapshots() {
+    try {
+        if (!fs.existsSync(SNAPSHOTS_PATH)) return {};
+        return JSON.parse(fs.readFileSync(SNAPSHOTS_PATH, 'utf8'));
+    } catch (e) {
+        return {};
+    }
+}
+
+function saveSnapshots(snaps) {
+    fs.writeFileSync(SNAPSHOTS_PATH, JSON.stringify(snaps));
+}
+
+function cleanOldSnapshots(snaps) {
+    const now = Date.now();
+    let changed = false;
+    for (const key in snaps) {
+        const history = snaps[key];
+        if (!history || history.length === 0) {
+            delete snaps[key]; changed = true; continue;
+        }
+        const lastSnap = history[history.length - 1];
+        // Если последний снепшот был более 48 часов назад — чистим
+        if (now - lastSnap.time > 48 * 60 * 60 * 1000) {
+            delete snaps[key];
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+function updateAndGetMomentum(channel, msgId, views, reactions) {
+    const snaps = loadSnapshots();
+    let changed = cleanOldSnapshots(snaps);
+    
+    const key = `${channel}_${msgId}`;
+    if (!snaps[key]) snaps[key] = [];
+    
+    const history = snaps[key];
+    const now = Date.now();
+    
+    let instVelocityViews = 0;
+    let instVelocityReactions = 0;
+    
+    if (history.length > 0) {
+        const last = history[history.length - 1];
+        const timeDeltaMs = now - last.time;
+        // Сохраняем снепшот, если прошло хотя бы 10 минут
+        if (timeDeltaMs >= 10 * 60 * 1000) {
+            const timeDeltaMin = timeDeltaMs / 60000;
+            instVelocityViews = (views - last.views) / timeDeltaMin;
+            instVelocityReactions = (reactions - last.reactions) / timeDeltaMin;
+            
+            history.push({ time: now, views, reactions });
+            changed = true;
+        } else {
+            // Если прошло меньше 10 минут, считаем по предыдущему (если есть), не сохраняя новый
+            if (history.length >= 2) {
+                const prev = history[history.length - 2];
+                const dMin = (now - prev.time) / 60000;
+                instVelocityViews = (views - prev.views) / Math.max(dMin, 1);
+                instVelocityReactions = (reactions - prev.reactions) / Math.max(dMin, 1);
+            }
+        }
+    } else {
+        history.push({ time: now, views, reactions });
+        changed = true;
+    }
+    
+    if (history.length > 5) snaps[key] = history.slice(-5);
+    if (changed) saveSnapshots(snaps);
+    
+    return {
+        instVelocityViews: Math.max(0, instVelocityViews),
+        instVelocityReactions: Math.max(0, instVelocityReactions)
+    };
+}
+
+
 /**
  * Главная функция расчёта Composite Final Score.
- *
- * Алгоритм:
- *   1. Базовые метрики (ER, Velocity)
- *   2. RVI — аномалия относительно нормы канала
- *      (если памяти нет → fallback на абсолютный VI)
- *   3. Size Multiplier
- *   4. Freshness
- *   5. Diversity Bonus
  *
  * @param {number} views
  * @param {number} reactions
@@ -161,41 +237,59 @@ function reactionDiversityBonus(reactionResults) {
  * @param {Object|null} channelMem     — запись из loadMemory()[channel]
  * @param {string|number|null} rawSubs — строка "1.2K" или число
  * @param {Array|null} reactionResults — детализация реакций
- * @returns {{ cfs: number, rvi: number, freshness: number, sizeM: number }}
+ * @param {string|null} channelName    — username канала (для снепшотов)
+ * @param {number|null} msgId          — ID сообщения (для снепшотов)
+ * @returns {{ cfs: number, rvi: number, freshness: number, sizeM: number, momentumR: number, momentumV: number }}
  */
-function calculateVirality(views, reactions, comments, postDateMs, channelMem = null, rawSubs = null, reactionResults = null) {
-    if (!views || views === 0) return { cfs: 0, rvi: 0, freshness: 0, sizeM: 1 };
+function calculateVirality(views, reactions, comments, postDateMs, channelMem = null, rawSubs = null, reactionResults = null, channelName = null, msgId = null) {
+    if (!views || views === 0) return { cfs: 0, rvi: 0, freshness: 0, sizeM: 1, momentumR: 0, momentumV: 0 };
+
+    let momentumR = 0;
+    let momentumV = 0;
+    if (channelName && msgId) {
+        const mom = updateAndGetMomentum(channelName, msgId, views, reactions);
+        momentumR = mom.instVelocityReactions;
+        momentumV = mom.instVelocityViews;
+    }
 
     const ageMin   = Math.max((Date.now() - postDateMs) / 60000, 0.5);
-    const er       = (reactions + comments * 1.5) / Math.max(views, 1);
+    
+    // ── Bayesian ER ───────────────────────────────────────────────────────
+    // Добавляем виртуальные просмотры для сглаживания "проблемы малых чисел"
+    const bayesianC = 100; // вес сглаживания
+    const priorER = (channelMem && channelMem.avg_er > 0) ? channelMem.avg_er : 0.03;
+    const er = (reactions + comments * 1.5 + bayesianC * priorER) / (Math.max(views, 1) + bayesianC);
+    
     const velocity = reactions / (ageMin + 5); // +5 мин защита от деления на ноль
 
     // ── RVI ───────────────────────────────────────────────────────────────
     let rvi;
+    let velRatio = 1;
     if (channelMem && channelMem.post_count >= 5) {
         // У канала достаточно истории (≥5 постов) — считаем реальную аномалию
         const erRatio  = channelMem.avg_er       > 0 ? er       / channelMem.avg_er       : 1;
-        const velRatio = channelMem.avg_velocity  > 0 ? velocity / channelMem.avg_velocity  : 1;
+        velRatio = channelMem.avg_velocity  > 0 ? velocity / channelMem.avg_velocity  : 1;
         // Геометрическое среднее двух аномалий (устойчивее к выбросам)
         rvi = Math.sqrt(erRatio * velRatio);
     } else {
         // Нет достаточной истории — консервативный абсолютный скор
-        // er нормируем: 1% ER (0.01) при 100 views → нейтраль ≈ 1.0
-        // Формула: sqrt(er * 100) нормирует: er=0.01→1.0, er=0.04→2.0, er=0.09→3.0
         const erNorm = Math.sqrt(Math.min(er * 100, 9)); // max 3.0 при er≥9%
-        // Velocity нормируем аналогично: log10(velocity+1) / log10(10) = log10(vel+1)
-        // velocity=1 → 0.3, velocity=9 → 0.5, velocity=99 → 0.5 (log10)
         const velNorm = Math.min(Math.log10(velocity + 1) / Math.log10(10), 1.0);
         rvi = Math.min(erNorm * (0.7 + 0.3 * velNorm), 3.0); // жёсткий кап 3.0 при нет истории
     }
 
+    // Внедряем моментум в velRatio для гравитационной свежести!
+    // Если мгновенная скорость больше средней за все время, используем мгновенную
+    if (channelMem && channelMem.avg_velocity > 0 && momentumR > velocity) {
+        velRatio = Math.max(velRatio, momentumR / channelMem.avg_velocity);
+    }
 
     // ── Size ──────────────────────────────────────────────────────────────
     const subs = parseSubs(rawSubs);
     const sizeM = sizeMultiplier(subs);
 
     // ── Freshness ─────────────────────────────────────────────────────────
-    const fresh = freshnessFactor(postDateMs);
+    const fresh = freshnessFactor(postDateMs, velRatio);
 
     // ── Reaction Diversity ────────────────────────────────────────────────
     const divBonus = reactionDiversityBonus(reactionResults);
@@ -209,6 +303,8 @@ function calculateVirality(views, reactions, comments, postDateMs, channelMem = 
         freshness: Math.round(fresh * 100) / 100,
         sizeM:    Math.round(sizeM * 100) / 100,
         divBonus: Math.round(divBonus * 100) / 100,
+        momentumR: Math.round(momentumR * 100) / 100,
+        momentumV: Math.round(momentumV * 100) / 100
     };
 }
 

@@ -108,15 +108,26 @@ async function saveToDatabase(imageBuffer, messageId, channelId) {
 }
 
 /**
- * Возвращает топ N самых копируемых мемов (по hitCount).
+ * Возвращает топ N самых копируемых мемов (по hitCount) и сбрасывает их счётчик,
+ * чтобы в следующем проходе не выдавать те же самые баяны.
  * @param {number} topN
  * @returns {Array} — отсортированный массив записей
  */
 function getTopDuplicates(topN = 2) {
-    return [...hashCache]
+    const top = [...hashCache]
         .filter(e => e.hitCount > 0 && e.channelId && e.messageId)
         .sort((a, b) => (b.hitCount || 0) - (a.hitCount || 0))
         .slice(0, topN);
+        
+    // Сбрасываем счётчики у выданных, чтобы не спамить ими постоянно
+    for (const t of top) {
+        const row = hashCache.find(h => h === t);
+        if (row) row.hitCount = 0;
+    }
+    
+    if (top.length > 0) saveHashes(hashCache);
+    
+    return top;
 }
 
 /**

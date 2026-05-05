@@ -339,7 +339,7 @@ async function processChannels(client, saveDiscoveredChannel) {
                         // Не мем (аудио/голос/стикер/нет медиа)
                     } else {
                         const subsRaw = subsCache[channel] ? (subsCache[channel].rawSubs || subsCache[channel]) : null;
-                        const scored = calculateVirality(views, reactions, replies, msg.date * 1000, channelMem, subsRaw, reactionResults);
+                        const scored = calculateVirality(views, reactions, replies, msg.date * 1000, channelMem, subsRaw, reactionResults, channel, msg.id);
                         const _chName2 = channel.toLowerCase().replace('@','');
                         const _cached2 = subsCache[_chName2];
                         const _subs2 = !_cached2 ? 0 : (typeof _cached2 === 'number' ? _cached2 : (_cached2.subs > 0 ? _cached2.subs : parseRawSubs(_cached2.rawSubs)));
@@ -356,6 +356,8 @@ async function processChannels(client, saveDiscoveredChannel) {
                             rvi: scored.rvi,
                             freshness: scored.freshness,
                             sizeM: scored.sizeM,
+                            momentumR: scored.momentumR,
+                            momentumV: scored.momentumV,
                             media: msg.media
                         });
                         stats.totalPosts++;
@@ -467,27 +469,39 @@ async function processChannels(client, saveDiscoveredChannel) {
         } catch(_) {}
     }
 
-    // ── Forwarding: top-15 из всех + top-5 из малых (<2000 подп.) без дублей ───
     if (!floodBanActive) {
-    const MAX_MAIN = config.maxMemesToForward || 15;
+    // 1. Старый формат: топ 5 по CFS (из тех, что отфильтрованы по MIN_RVI в qualified)
+    const MAX_OLD = 5;
+    const oldQueue = allMemes.slice(0, MAX_OLD).map(m => ({ ...m, _slot: 'main' }));
+    const mainIds = new Set(oldQueue.map(m => m.channel + '/' + m.id));
+
+    // 2. Новый формат: "Гравитационный моментум"
+    // Ищем посты, которые быстро растут прямо сейчас
+    const MAX_MOMENTUM = (config.maxMemesToForward || 15) - MAX_OLD;
+    const momentumQueue = [...allMemes]
+        .filter(m => !mainIds.has(m.channel + '/' + m.id))
+        .filter(m => m.momentumR > 0 || m.momentumV > 0) // Есть хоть какая-то динамика
+        .sort((a, b) => b.momentumR - a.momentumR) // Сортируем по скорости набора реакций
+        .slice(0, MAX_MOMENTUM)
+        .map(m => ({ ...m, _slot: 'momentum' }));
+    
+    for (let m of momentumQueue) mainIds.add(m.channel + '/' + m.id);
+
+    // 3. Малые каналы: из ОСТАТКА
     const MAX_SMALL = config.maxSmallChannelMemes || 5;
-
-    // Основная очередь: top MAX_MAIN по RVI (уже отсортированы)
-    const mainQueue = allMemes.slice(0, MAX_MAIN).map(m => ({ ...m, _slot: 'main' }));
-    const mainIds = new Set(mainQueue.map(m => m.channel + '/' + m.id));
-
-    // Малые каналы: из ОСТАТКА (не попавшего в top-15), только isSmall, top MAX_SMALL
     const smallQueue = allMemes
         .filter(m => m.isSmall && !mainIds.has(m.channel + '/' + m.id))
         .slice(0, MAX_SMALL)
         .map(m => ({ ...m, _slot: 'small' }));
 
-    const forwardQueue = [...mainQueue, ...smallQueue];
+    const forwardQueue = [...oldQueue, ...momentumQueue, ...smallQueue];
     let forwardedCount = 0;
+    let forwardedMomentum = 0;
     let forwardedSmall = 0;
 
     for (let meme of forwardQueue) {
-        if (meme._slot === 'main' && forwardedCount >= MAX_MAIN) continue;
+        if (meme._slot === 'main' && forwardedCount >= MAX_OLD) continue;
+        if (meme._slot === 'momentum' && forwardedMomentum >= MAX_MOMENTUM) continue;
         if (meme._slot === 'small' && forwardedSmall >= MAX_SMALL) continue;
 
         try {
@@ -600,8 +614,10 @@ async function processChannels(client, saveDiscoveredChannel) {
 
 
             const er = meme.views > 0 ? ((meme.reactions / meme.views) * 100).toFixed(2) : 0;
+            const slotName = meme._slot === 'main' ? 'Старый формат (CFS)' : (meme._slot === 'momentum' ? 'Гравитационный Моментум 🚀' : 'Малый канал 🐣');
             const text = [
                 `🔥 <b>CFS: ${meme.vi}</b>  ·  RVI: ×${meme.rvi}  ·  Size: ×${meme.sizeM}  ·  Свежесть: ${Math.round(meme.freshness*100)}%`,
+                `📥 Алгоритм: <b>${slotName}</b>`,
                 ``,
                 `📡 Источник: @${meme.channel}`,
                 `👁 Просмотров: <b>${meme.views.toLocaleString()}</b>  ·  ❤️ Реакций: <b>${meme.reactions}</b>  ·  ER: <b>${er}%</b>`,
@@ -615,7 +631,10 @@ async function processChannels(client, saveDiscoveredChannel) {
 
             // Сохраняем в базу анти-баяна
             await saveToDatabase(buffer, meme.id, meme.channel);
-            if (meme._slot === 'small') forwardedSmall++; else forwardedCount++;
+            if (meme._slot === 'small') forwardedSmall++;
+            else if (meme._slot === 'momentum') forwardedMomentum++;
+            else forwardedCount++;
+            
             stats.forwarded++;
 
         } catch (e) {
@@ -626,8 +645,8 @@ async function processChannels(client, saveDiscoveredChannel) {
     } // end if (!floodBanActive)
 
     saveEntityCache(); // Сохраняем все накопленные entities
-    const _fwdCount = (typeof forwardedCount !== 'undefined') ? forwardedCount : 0;
-    console.log(`\n✅ Итерация завершена. Переслано: ${floodBanActive ? 0 : _fwdCount} мемов.`);
+    const _fwdCount = (typeof forwardedCount !== 'undefined') ? (forwardedCount + forwardedSmall + forwardedMomentum) : 0;
+    console.log(`\n✅ Итерация завершена. Переслано: ${floodBanActive ? 0 : _fwdCount} мемов (Старый: ${typeof forwardedCount !== 'undefined' ? forwardedCount : 0}, Моментум: ${typeof forwardedMomentum !== 'undefined' ? forwardedMomentum : 0}, Малые: ${typeof forwardedSmall !== 'undefined' ? forwardedSmall : 0}).`);
     console.log(`⏰ Следующий прогон через ~30 мин (в ${new Date(Date.now() + 30*60*1000).toLocaleTimeString('ru')})`);
 
     // ── Итоговый отчёт в канал ───────────────────────────────────────────────
