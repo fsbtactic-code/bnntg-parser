@@ -762,23 +762,48 @@ async function processChannels(client, saveDiscoveredChannel) {
                             silent: false, background: false, withMyScore: false,
                             dropAuthor: false, dropMediaCaptions: false, noforwards: false,
                         }));
-                        // Подпись: Самая копируемая картинка + список каналов
-                        // Убираем @ из имени канала для корректных URL (t.me не любит @)
+                        // ── Формируем отчёт о самом копируемом меме ─────────────────────────
                         const cleanCh = (ch) => String(ch || '').replace('@', '');
-                        let seenLinks = '';
+                        const totalSeen = (dupe.seenIn ? dupe.seenIn.length : 0);
+                        // hitCount — количество новых совпадений за этот период (сброшен при выдаче)
+                        // seenIn — накопленная история всех каналов где видели картинку
+                        const totalCount = totalSeen || dupe.hitCount || 1;
+
+                        let lines = [];
+
+                        // 1. Первое появление (оригинал)
                         if (dupe.channelId && dupe.messageId) {
-                            seenLinks += `🔹 <b>Первое появление:</b> <a href="https://t.me/${cleanCh(dupe.channelId)}/${dupe.messageId}">@${cleanCh(dupe.channelId)}</a>\n`;
+                            lines.push(`🏁 <b>Оригинал:</b> <a href="https://t.me/${cleanCh(dupe.channelId)}/${dupe.messageId}">@${cleanCh(dupe.channelId)}</a>`);
                         }
+
+                        // 2. Все каналы где встречалась
                         if (dupe.seenIn && dupe.seenIn.length > 0) {
-                            seenLinks += `🔁 <b>Также замечено (${dupe.seenIn.length} раз):</b>\n`;
-                            seenLinks += dupe.seenIn.slice(-10).map(x => 
-                                `  • <a href="https://t.me/${cleanCh(x.channel)}/${x.msgId}">@${cleanCh(x.channel)}</a>`
-                            ).join('\n');
+                            const all = dupe.seenIn;
+                            let channelLines;
+                            if (all.length <= 15) {
+                                // Все каналы
+                                channelLines = all.map((x, i) =>
+                                    `  ${i + 1}. <a href="https://t.me/${cleanCh(x.channel)}/${x.msgId}">@${cleanCh(x.channel)}</a>`
+                                );
+                            } else {
+                                // Первые 10 + последние 5 (с разделителем)
+                                const first = all.slice(0, 10).map((x, i) =>
+                                    `  ${i + 1}. <a href="https://t.me/${cleanCh(x.channel)}/${x.msgId}">@${cleanCh(x.channel)}</a>`
+                                );
+                                const last = all.slice(-5).map((x, i) =>
+                                    `  ${all.length - 4 + i}. <a href="https://t.me/${cleanCh(x.channel)}/${x.msgId}">@${cleanCh(x.channel)}</a>`
+                                );
+                                channelLines = [...first, `  ... (ещё ${all.length - 15} каналов) ...`, ...last];
+                            }
+                            lines.push(`\n🔁 <b>Замечено в ${totalCount} каналах:</b>\n` + channelLines.join('\n'));
+                        } else {
+                            lines.push(`\n📊 Новых совпадений за проход: ${dupe.hitCount || 1}`);
                         }
-                        const caption = seenLinks || '  • Нет данных об источнике';
+
+                        const caption = lines.join('\n');
                         await botSendMessage(
                             BOT_CHAT || currentConfig.destinationChannel,
-                            `🖼 <b>Самая копируемая картинка</b> (×${dupe.hitCount || '?'})\n\n` + caption
+                            `🖼 <b>Самая копируемая картинка</b> (×${totalCount} копий)\n\n` + caption
                         ).catch(() => {});
                         await new Promise(r => setTimeout(r, 1000));
                     } catch(e) {
