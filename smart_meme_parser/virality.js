@@ -334,10 +334,90 @@ function adaptiveThreshold(allScores) {
     return mean * multiplier;
 }
 
+// ─── Micro-Viral Detection Engine ────────────────────────────────────────────
+//
+// Для каналов < 1000 подписчиков абсолютные числа (views, reactions) малы,
+// но пост может быть вирусным ОТНОСИТЕЛЬНО нормы этого канала.
+//
+// MCVI (Micro Channel Viral Index) = насколько пост аномален для своего канала:
+//   viewsRatio  = views / avg_views_канала    → в 3x больше обычного = сигнал
+//   erRatio     = er / avg_er_канала          → в 2x больше реакций на просмотр = сигнал
+//   velBonus    = velocity / avg_velocity     → рост быстрее обычного = бонус
+//   freshness   = exp decay с τ=90мин        → чуть медленнее стареет (посты выходят редко)
+//
+// Результат: MCVI ≥ 2.0 считается вирусным для микроканала.
+
+/**
+ * @param {number} views
+ * @param {number} reactions
+ * @param {number} comments
+ * @param {number} postDateMs
+ * @param {Object|null} channelMem  — EMA-память канала (из loadMemory)
+ * @param {Array|null} reactionResults
+ * @param {string|null} channelName
+ * @param {number|null} msgId
+ * @returns {{ mcvi, viewsRatio, erRatio, freshness, momentumV }}
+ */
+function calculateMicroVirality(views, reactions, comments, postDateMs, channelMem = null, reactionResults = null, channelName = null, msgId = null) {
+    if (!views || views === 0) return { mcvi: 0, viewsRatio: 0, erRatio: 0, freshness: 0, momentumV: 0 };
+
+    let momentumV = 0;
+    let momentumR = 0;
+    if (channelName && msgId) {
+        const mom = updateAndGetMomentum(channelName, msgId, views, reactions);
+        momentumV = mom.instVelocityViews;
+        momentumR = mom.instVelocityReactions;
+    }
+
+    const ageMin = Math.max((Date.now() - postDateMs) / 60000, 0.5);
+    const er = (reactions + comments * 1.5) / Math.max(views, 1);
+    const velocity = views / (ageMin + 10); // просмотры/мин (защита малой базой)
+
+    // ── Относительные аномалии против нормы канала ───────────────────────
+    const avgViews    = (channelMem && channelMem.avg_views    > 0) ? channelMem.avg_views    : views * 0.5;
+    const avgER       = (channelMem && channelMem.avg_er       > 0) ? channelMem.avg_er       : 0.03;
+    const avgVelocity = (channelMem && channelMem.avg_velocity > 0) ? channelMem.avg_velocity : 0.1;
+
+    // Отношение просмотров: ключевой сигнал для микроканала
+    const viewsRatio = views / Math.max(avgViews, 3);
+
+    // Отношение ER: реакционность аномалия
+    const erRatio = er / Math.max(avgER, 0.01);
+
+    // Бонус мгновенной скорости (momentum):
+    // Если пост набирает просмотры быстрее чем обычно — это прорыв
+    const velRatio = momentumV > 0
+        ? momentumV / Math.max(avgVelocity, 0.01)
+        : velocity / Math.max(avgVelocity, 0.01);
+    const velBonus = 1 + Math.log1p(Math.max(0, velRatio - 1)) * 0.3;
+
+    // Геометрическое среднее ключевых аномалий (устойчиво к выбросам)
+    const anomalyScore = Math.sqrt(viewsRatio * erRatio);
+
+    // Свежесть: τ=90мин (микроканалы постят реже, свежесть важна дольше)
+    const fresh = Math.exp(-ageMin / 90);
+
+    // Бонус разнообразия реакций
+    const divBonus = reactionDiversityBonus(reactionResults);
+
+    // MCVI = аномалия × бонус скорости × свежесть × разнообразие
+    const mcvi = anomalyScore * velBonus * fresh * divBonus;
+
+    return {
+        mcvi:       Math.round(mcvi * 100) / 100,
+        viewsRatio: Math.round(viewsRatio * 100) / 100,
+        erRatio:    Math.round(erRatio * 100) / 100,
+        freshness:  Math.round(fresh * 100) / 100,
+        momentumV:  Math.round(momentumV * 100) / 100,
+        momentumR:  Math.round(momentumR * 100) / 100,
+    };
+}
+
 // ─── Exports ─────────────────────────────────────────────────────────────────
 
 module.exports = {
     calculateVirality,
+    calculateMicroVirality,
     updateMemory,
     loadMemory,
     saveMemory,

@@ -12,7 +12,7 @@ const { TelegramClient, Api } = require('telegram');
 const { StringSession } = require('telegram/sessions');
 const input = require('input');
 const https = require('https');
-const { calculateVirality, updateMemory, loadMemory, saveMemory, adaptiveThreshold } = require('./virality');
+const { calculateVirality, calculateMicroVirality, updateMemory, loadMemory, saveMemory, adaptiveThreshold } = require('./virality');
 const { isDuplicate, saveToDatabase, getTopDuplicates, isAlreadyForwarded } = require('./dedup');
 
 // Защита от падений из-за таймаутов внутри gramjs
@@ -334,14 +334,24 @@ async function processChannels(client, saveDiscoveredChannel) {
                 }
                 const replies = msg.replies ? msg.replies.replies : 0;
 
-                stats.totalPostsViewed++; // считаем все посты до любой фильтрации
+                stats.totalPostsViewed++;
 
-                // 1. Сначала СКОРИМ с текущей памятью (до обновления)
-                // Минимальные пороги: ≥3 реакций и ≥100 просмотров (защита от ложных аномалий)
-                if (msg.date * 1000 >= timeLimitMs && reactions >= 3 && views >= 100) {
+                // Определяем размер канала ДО фильтра — для адаптивных порогов
+                const _chNameF = channel.toLowerCase().replace('@','');
+                const _cachedF = subsCache[_chNameF];
+                const _subsF = !_cachedF ? 0 : (typeof _cachedF === 'number' ? _cachedF :
+                    (_cachedF.subs > 0 ? _cachedF.subs : parseRawSubs(_cachedF.rawSubs)));
+                const isMicroChannel = _subsF > 0 && _subsF < 1000;
+
+                // Адаптивные пороги: микроканалы (< 1000 подп.) используют заниженные барьеры
+                // У них редко >100 просмотров быстро — важна ОТНОСИТЕЛЬНАЯ аномалия
+                const minViews     = isMicroChannel ? 15  : 100;
+                const minReactions = isMicroChannel ? 2   : 3;
+
+                // 1. Скорим с текущей памятью (до обновления EMA)
+                if (msg.date * 1000 >= timeLimitMs && reactions >= minReactions && views >= minViews) {
                     // Фильтруем: только фото, GIF, видео (не аудио/голос/стикеры)
                     const mediaType = msg.media?.className || '';
-                    const isDocument = mediaType === 'MessageMediaDocument';
                     const mimeType = msg.media?.document?.mimeType || '';
                     const isAudio = mimeType.startsWith('audio/') || mimeType === 'video/ogg';
                     const isVoice = msg.media?.document?.attributes?.some?.(a => a.className === 'DocumentAttributeAudio' && a.voice);
@@ -350,26 +360,40 @@ async function processChannels(client, saveDiscoveredChannel) {
                     if (!msg.media || isAudio || isVoice || isSticker) {
                         // Не мем (аудио/голос/стикер/нет медиа)
                     } else {
-                        const subsRaw = subsCache[channel] ? (subsCache[channel].rawSubs || subsCache[channel]) : null;
-                        const scored = calculateVirality(views, reactions, replies, msg.date * 1000, channelMem, subsRaw, reactionResults, channel, msg.id);
-                        const _chName2 = channel.toLowerCase().replace('@','');
-                        const _cached2 = subsCache[_chName2];
-                        const _subs2 = !_cached2 ? 0 : (typeof _cached2 === 'number' ? _cached2 : (_cached2.subs > 0 ? _cached2.subs : parseRawSubs(_cached2.rawSubs)));
+                        const subsRaw = subsCache[_chNameF] ? (subsCache[_chNameF].rawSubs || subsCache[_chNameF]) : null;
+
+                        let scoredCFS = { cfs: 0, rvi: 0, freshness: 0, sizeM: 1.2, momentumR: 0, momentumV: 0 };
+                        let scoredMicro = { mcvi: 0, viewsRatio: 0, erRatio: 0, freshness: 0, momentumV: 0 };
+
+                        if (isMicroChannel) {
+                            // Для микроканалов: оба скора (MCVI — основной, CFS — для совместимости)
+                            scoredMicro = calculateMicroVirality(views, reactions, replies, msg.date * 1000, channelMem, reactionResults, channel, msg.id);
+                            // CFS тоже считаем, но с заниженным весом (для сортировки в общем пуле)
+                            scoredCFS = calculateVirality(views, reactions, replies, msg.date * 1000, channelMem, subsRaw, reactionResults, channel, msg.id);
+                        } else {
+                            scoredCFS = calculateVirality(views, reactions, replies, msg.date * 1000, channelMem, subsRaw, reactionResults, channel, msg.id);
+                        }
+
                         channelMemes.push({
                             channel,
                             peer: srcPeer,
-                            isSmall: _subs2 > 0 && _subs2 < 2000, // малый канал < 2000 подп.
+                            isSmall:  _subsF > 0 && _subsF < 2000,
+                            isMicro:  isMicroChannel,
                             id: msg.id,
                             date: msg.date,
                             views,
                             reactions,
                             replies,
-                            vi: scored.cfs,
-                            rvi: scored.rvi,
-                            freshness: scored.freshness,
-                            sizeM: scored.sizeM,
-                            momentumR: scored.momentumR,
-                            momentumV: scored.momentumV,
+                            vi:       scoredCFS.cfs,
+                            rvi:      scoredCFS.rvi,
+                            freshness: scoredCFS.freshness,
+                            sizeM:    scoredCFS.sizeM,
+                            momentumR: scoredCFS.momentumR,
+                            momentumV: scoredCFS.momentumV,
+                            // Micro-метрики
+                            mcvi:       scoredMicro.mcvi,
+                            viewsRatio: scoredMicro.viewsRatio,
+                            erRatio:    scoredMicro.erRatio,
                             media: msg.media
                         });
                         stats.totalPosts++;
@@ -489,6 +513,7 @@ async function processChannels(client, saveDiscoveredChannel) {
     let forwardedCount = 0;
     let forwardedMomentum = 0;
     let forwardedSmall = 0;
+    let forwardedMicro = 0;
 
     if (!floodBanActive) {
     // 1. CFS: топ 5 по Composite Final Score
@@ -512,20 +537,32 @@ async function processChannels(client, saveDiscoveredChannel) {
 
     // 3. Малые каналы: берём из СЫРОГО пула (до RVI-фильтра)
     // У малых каналов может не быть достаточной истории для высокого RVI
-    const MAX_SMALL = config.maxSmallChannelMemes || 5;
+    const MAX_SMALL = config.maxSmallChannelMemes || 3;
     const smallQueue = allMemesRaw
-        .filter(m => m.isSmall && !mainIds.has(m.channel + '/' + m.id))
+        .filter(m => m.isSmall && !m.isMicro && !mainIds.has(m.channel + '/' + m.id))
         .sort((a, b) => b.vi - a.vi)
         .slice(0, MAX_SMALL)
         .map(m => ({ ...m, _slot: 'small' }));
+    for (let m of smallQueue) mainIds.add(m.channel + '/' + m.id);
 
-    console.log(`📊 Очереди: CFS=${oldQueue.length} Momentum=${momentumQueue.length} Small=${smallQueue.length}`);
-    const forwardQueue = [...oldQueue, ...momentumQueue, ...smallQueue];
+    // 4. Микроканалы (< 1000 подп.): сортируем по MCVI — нашей относительной метрике
+    // Берём из сырого пула, MCVI >= 1.5 считается аномалией для микроканала
+    const MAX_MICRO = 3;
+    const microQueue = allMemesRaw
+        .filter(m => m.isMicro && !mainIds.has(m.channel + '/' + m.id))
+        .sort((a, b) => b.mcvi - a.mcvi)
+        .slice(0, MAX_MICRO)
+        .map(m => ({ ...m, _slot: 'micro' }));
+
+    const microActive = microQueue.filter(m => m.mcvi >= 1.5).length;
+    console.log(`📊 Очереди: CFS=${oldQueue.length} Momentum=${momentumQueue.length} Small=${smallQueue.length} Micro=${microQueue.length}(из них аномальных MCVI≥1.5: ${microActive})`);
+    const forwardQueue = [...oldQueue, ...momentumQueue, ...smallQueue, ...microQueue];
 
     for (let meme of forwardQueue) {
-        if (meme._slot === 'main' && forwardedCount >= MAX_OLD) continue;
+        if (meme._slot === 'main'     && forwardedCount    >= MAX_OLD)      continue;
         if (meme._slot === 'momentum' && forwardedMomentum >= MAX_MOMENTUM) continue;
-        if (meme._slot === 'small' && forwardedSmall >= MAX_SMALL) continue;
+        if (meme._slot === 'small'    && forwardedSmall    >= MAX_SMALL)    continue;
+        if (meme._slot === 'micro'    && forwardedMicro    >= MAX_MICRO)    continue;
 
         try {
             // ── Быстрая дедупликация по channel+msgId (до скачивания медиа) ──
@@ -625,7 +662,10 @@ async function processChannels(client, saveDiscoveredChannel) {
 
 
             const er = meme.views > 0 ? ((meme.reactions / meme.views) * 100).toFixed(2) : 0;
-            const slotName = meme._slot === 'main' ? 'Старый формат (CFS)' : (meme._slot === 'momentum' ? 'Гравитационный Моментум 🚀' : 'Малый канал 🐣');
+            const slotName = meme._slot === 'main'     ? 'Вирусный (CFS) 🔥'
+                           : meme._slot === 'momentum'  ? 'Гравитационный Моментум 🚀'
+                           : meme._slot === 'micro'     ? `Микроканал 🔬 (MCVI:${meme.mcvi} Views×${meme.viewsRatio} ER×${meme.erRatio})`
+                           :                              'Малый канал 🐣';
             const text = [
                 `🔥 <b>CFS: ${meme.vi}</b>  ·  RVI: ×${meme.rvi}  ·  Size: ×${meme.sizeM}  ·  Свежесть: ${Math.round(meme.freshness*100)}%`,
                 `📥 Алгоритм: <b>${slotName}</b>`,
@@ -642,8 +682,9 @@ async function processChannels(client, saveDiscoveredChannel) {
 
             // Сохраняем в базу анти-баяна
             await saveToDatabase(buffer, meme.id, meme.channel);
-            if (meme._slot === 'small') forwardedSmall++;
+            if (meme._slot === 'small')    forwardedSmall++;
             else if (meme._slot === 'momentum') forwardedMomentum++;
+            else if (meme._slot === 'micro')    forwardedMicro++;
             else forwardedCount++;
             
             stats.forwarded++;
@@ -656,8 +697,8 @@ async function processChannels(client, saveDiscoveredChannel) {
     } // end if (!floodBanActive)
 
     saveEntityCache(); // Сохраняем все накопленные entities
-    const _fwdCount = forwardedCount + forwardedSmall + forwardedMomentum;
-    console.log(`\n✅ Итерация завершена. Переслано: ${_fwdCount} мемов (CFS: ${forwardedCount}, Моментум: ${forwardedMomentum}, Малые: ${forwardedSmall}).`);
+    const _fwdCount = forwardedCount + forwardedSmall + forwardedMomentum + forwardedMicro;
+    console.log(`\n✅ Итерация завершена. Переслано: ${_fwdCount} мемов (CFS: ${forwardedCount}, Моментум: ${forwardedMomentum}, Малые: ${forwardedSmall}, Микро: ${forwardedMicro}).`);
     console.log(`⏰ Следующий прогон через ~30 мин (в ${new Date(Date.now() + 30*60*1000).toLocaleTimeString('ru')})`);
 
     // ── Итоговый отчёт в канал ───────────────────────────────────────────────
