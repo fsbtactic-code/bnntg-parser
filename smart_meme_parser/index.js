@@ -257,14 +257,18 @@ async function processChannels(client, saveDiscoveredChannel) {
                     if (fwdChatInfo && fwdChatInfo.username) {
                         const username = fwdChatInfo.username;
                         
-                        // Проверяем игнор-лист (удаленные из Discovered)
                         const ignoredPath = './ignored_channels.json';
                         let ignoredChannels = [];
                         if (fs.existsSync(ignoredPath)) {
                             try { ignoredChannels = JSON.parse(fs.readFileSync(ignoredPath, 'utf8')); } catch(e){}
                         }
 
-                        if (!ignoredChannels.includes(username)) {
+                        // Проверяем, не отслеживаем ли мы уже этот канал
+                        const isAlreadyTracked = currentConfig.targetChannels.some(ch => 
+                            ch.replace('@', '').toLowerCase() === username.toLowerCase()
+                        );
+
+                        if (!ignoredChannels.includes(username) && !isAlreadyTracked) {
                             // Кэш подписчиков...
                             if (subsCache[username] === undefined) {
                                 try {
