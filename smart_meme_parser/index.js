@@ -1087,15 +1087,13 @@ async function processChannels(client, saveDiscoveredChannel, isTopMemePass = fa
                            : meme._slot === 'small'     ? `Small 🐣 (SCVI:${meme.scvi || meme.vi} Z:${meme.clusterAnomaly})`
                            : meme._slot === 'medium'    ? `Medium 📊 (CFS:${meme.vi} boost)`
                            :                              'Канал';
-            const text = [
-                `🔥 <b>CFS: ${meme.vi}</b>  ·  RVI: ×${meme.rvi}  ·  Size: ×${meme.sizeM}  ·  Свежесть: ${Math.round(meme.freshness*100)}%`,
-                `📥 Алгоритм: <b>${slotName}</b>`,
-                `🏷 Кластер: ${meme.cluster || 'bridge'} (${meme.subs || '?'} подп.)`,
-                ``,
-                `📡 Источник: @${meme.channel}`,
-                `👁 Просмотров: <b>${meme.views.toLocaleString()}</b>  ·  ❤️ Реакций: <b>${meme.reactions}</b>  ·  ER: <b>${er}%</b>`,
-                `💬 Комментариев: ${meme.replies || 0}`,
-            ].join('\n');
+            const text = `<blockquote expandable>🔥 <b>CFS: ${meme.vi}</b>  ·  RVI: ×${meme.rvi}  ·  Size: ×${meme.sizeM}  ·  Свежесть: ${Math.round(meme.freshness*100)}%
+📥 Алгоритм: <b>${slotName}</b>
+🏷 Кластер: ${meme.cluster || 'bridge'} (${meme.subs || '?'} подп.)
+
+📡 Источник: @${meme.channel}
+👁 Просмотров: <b>${meme.views.toLocaleString()}</b>  ·  ❤️ Реакций: <b>${meme.reactions}</b>  ·  ER: <b>${er}%</b>
+💬 Комментариев: ${meme.replies || 0}</blockquote>`;
 
             const botRes = await botSendMessage(BOT_CHAT || currentConfig.destinationChannel, text, newMsgId)
                 .catch(e => { console.error('Bot send error:', e.message); return null; });
