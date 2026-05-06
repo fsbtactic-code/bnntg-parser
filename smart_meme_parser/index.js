@@ -9,13 +9,15 @@ try {
 } catch(e) {}
 
 const { TelegramClient, Api } = require('telegram');
+const { Logger } = require('telegram/extensions/Logger');
 const { StringSession } = require('telegram/sessions');
 const input = require('input');
 const https = require('https');
-const { calculateVirality, calculateMicroVirality, updateMemory, loadMemory, saveMemory, adaptiveThreshold } = require('./virality');
-const { isDuplicate, saveToDatabase, getTopDuplicates, isAlreadyForwarded, getSeenInStats } = require('./dedup');
+const { calculateVirality, calculateNanoVirality, calculateMicroVirality, calculateSmallVirality, adaptedMediumCFS, updateMemory, loadMemory, saveMemory, adaptiveThreshold } = require('./virality');
+const { isDuplicate, saveToDatabase, getTopDuplicates, isAlreadyForwarded, isAlreadyProcessed, markAsForwarded, getSeenInStats } = require('./dedup');
 const archive  = require('./seen_archive');    // бинарный архив уникальных pHash (12 байт/картинка)
 const temporal  = require('./temporal_profile'); // временной профиль (часовая/недельная нормализация)
+const clusters  = require('./cluster_stats');   // кластерная статистика (nano/micro/small/medium/bridge)
 
 // Защита от падений из-за таймаутов внутри gramjs
 process.on('unhandledRejection', (reason, promise) => {
@@ -24,6 +26,27 @@ process.on('unhandledRejection', (reason, promise) => {
 process.on('uncaughtException', (err) => {
     console.error('Uncaught Exception:', err);
 });
+
+// ─── Атомарный менеджер config.json (mutex против race condition) ────────────
+// Все записи в config.json проходят через updateConfig() — читаем свежий файл,
+// применяем функцию-мутатор, пишем обратно. Очередь гарантирует serialization.
+const CONFIG_FILE = './config.json';
+let _cfgMutexQueue = Promise.resolve();
+function updateConfig(mutatorFn) {
+    _cfgMutexQueue = _cfgMutexQueue.then(async () => {
+        try {
+            const raw = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+            const result = await mutatorFn(raw);
+            if (result !== false) {
+                fs.writeFileSync(CONFIG_FILE, JSON.stringify(result || raw, null, 4));
+            }
+        } catch(e) {
+            console.error('updateConfig error:', e.message);
+        }
+    });
+    return _cfgMutexQueue;
+}
+
 
 // ─── Bot API helper ─────────────────────────────────────────────────────────
 const BOT_TOKEN  = process.env.BOT_TOKEN;
@@ -55,6 +78,43 @@ function botSendMessage(chatId, text, replyToMsgId) {
     });
 }
 
+const ADMIN_TG_ID = '1961690631';
+let logBuffer = [];
+
+function tgLog(msg, isError = false) {
+    // Игнорируем спам-логи, иначе бот отлетит за спам (600+ каналов)
+    if (msg.includes('Парсинг канала:')) return;
+    if (msg.includes('Найден новый потенциальный канал')) return;
+
+    const timestamp = new Date().toLocaleTimeString('ru');
+    logBuffer.push(`[${timestamp}] ${msg}`);
+    
+    if (isError || logBuffer.length >= 10) {
+        // Экранируем HTML чтобы не сломать парсер
+        const cleanLogs = logBuffer.join('\n').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const text = (isError ? "🚨 <b>ОШИБКА ПАРСЕРА</b>\n\n" : "📜 <b>Логи парсера (10 событий)</b>\n\n") +
+                     "<pre>" + cleanLogs + "</pre>";
+        
+        botSendMessage(ADMIN_TG_ID, text).catch(()=>{});
+        logBuffer = []; // очищаем буфер
+    }
+}
+
+// Заменяем оригинальные console.log и console.error
+const origLog = console.log;
+const origError = console.error;
+
+console.log = function(...args) {
+    origLog.apply(console, args);
+    const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+    tgLog(msg);
+};
+
+console.error = function(...args) {
+    origError.apply(console, args);
+    const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a, Object.getOwnPropertyNames(a)) : String(a)).join(' ');
+    tgLog(msg, true);
+};
 
 // Загружаем конфиг
 const config = JSON.parse(fs.readFileSync('./config.json', 'utf8'));
@@ -81,11 +141,120 @@ if (fs.existsSync(sessionFile)) {
 }
 const stringSession = new StringSession(sessionString);
 
+// Функция для парсинга инфы о канале по HTTP (чтобы не ловить FloodWait)
+async function fetchChannelInfoHTTP(channelName) {
+    for (let attempt = 1; attempt <= 5; attempt++) {
+        try {
+            const html = await new Promise((resolve, reject) => {
+                const req = https.get('https://t.me/' + channelName, { timeout: 3000 }, (res) => {
+                    let d = '';
+                    res.on('data', c => d += c);
+                    res.on('end', () => resolve(d));
+                });
+                req.on('error', reject);
+                req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
+            });
+            const titleMatch = html.match(/<meta property="og:title" content="([^"]+)">/);
+            const descMatch = html.match(/<meta property="og:description" content="([^"]+)">/);
+            const extraMatch = html.match(/tgme_page_extra.*?>([^<]+)</);
+            
+            let subsCount = 0;
+            if (extraMatch) {
+                const raw = extraMatch[1].replace(/\s/g, '').replace(/,/g, '');
+                const subMatch = raw.match(/(\d+)/);
+                if (subMatch) subsCount = parseInt(subMatch[1]) || 0;
+            }
+            
+            return {
+                title: titleMatch ? titleMatch[1] : '',
+                desc: descMatch ? descMatch[1] : '',
+                subs: subsCount
+            };
+        } catch (e) {
+            await new Promise(r => setTimeout(r, 1000 * attempt));
+        }
+    }
+    return null;
+}
+
+// Проверяет соответствие канала формату мем-канала через HTTP (t.me/s/) без TG API
+// Критерии: >80% постов = одиночное медиа (фото/видео) + текст ≤50 символов
+async function checkMemeFormatViaHTTP(channelName) {
+    try {
+        const { statusCode, html } = await new Promise((resolve, reject) => {
+            const req = https.get(`https://t.me/s/${channelName}`, {
+                headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+                timeout: 8000
+            }, (res) => {
+                // 302 = приватный/закрытый канал, нет публичной ленты
+                if (res.statusCode !== 200) {
+                    res.resume();
+                    return resolve({ statusCode: res.statusCode, html: '' });
+                }
+                let d = '';
+                res.on('data', c => d += c);
+                res.on('end', () => resolve({ statusCode: res.statusCode, html: d }));
+            });
+            req.on('error', reject);
+            req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
+        });
+
+        if (statusCode !== 200 || !html) return false;
+
+        // Парсим посты из t.me/s/ ленты
+        const posts = html.split('tgme_widget_message_wrap');
+        if (posts.length < 4) return false; // меньше 3 постов — не хватает данных
+
+        let totalPosts = 0;
+        let singleMediaPosts = 0;
+        let shortTextPosts = 0;
+
+        for (const post of posts.slice(1)) {
+            totalPosts++;
+
+            // Одиночное медиа: есть photo/video, но НЕТ album (grouped)
+            const hasPhoto  = /tgme_widget_message_photo_wrap/i.test(post);
+            const hasVideo  = /tgme_widget_message_video_wrap|tgme_widget_message_roundvideo/i.test(post);
+            const hasAlbum  = /tgme_widget_message_grouped/i.test(post);
+            const hasSingleMedia = (hasPhoto || hasVideo) && !hasAlbum;
+            if (hasSingleMedia) singleMediaPosts++;
+
+            // Текст поста: внутри tgme_widget_message_text, очищаем HTML
+            const textMatch = post.match(/class="tgme_widget_message_text[^"]*"[^>]*>([\s\S]*?)<\/div>/);
+            let textLen = 0;
+            if (textMatch) {
+                const rawText = textMatch[1].replace(/<[^>]+>/g, '').replace(/&[a-z]+;/gi, ' ').trim();
+                textLen = rawText.length;
+            }
+            if (textLen <= 30) shortTextPosts++; // строже: 50 → 30 символов
+        }
+
+        if (totalPosts < 5) return false; // минимум 5 постов для достоверности
+
+        const singleMediaRatio = singleMediaPosts / totalPosts;
+        const shortTextRatio   = shortTextPosts / totalPosts;
+
+        // Строже: ≥85% одиночных медиа И ≥85% постов с текстом ≤ 30‍символов
+        return singleMediaRatio >= 0.85 && shortTextRatio >= 0.85;
+    } catch(e) {
+        return false;
+    }
+}
+
 async function start() {
     console.log("🚀 Запуск Smart Meme Parser...");
 
+    // ── Счётчик проходов (персистентный) ──
+    const PASS_COUNTER_PATH = './pass_counter.json';
+    const TOP_MEME_EVERY_N = 4; // самый копируемый — раз в 4 прохода (~2 часа)
+
+    // Создаём тихий логгер — подавляем gramJS INFO-спам (Starting direct file download, etc.)
+    const silentLogger = new Logger();
+    silentLogger.setLevel('none');
+
     const client = new TelegramClient(stringSession, config.apiId, config.apiHash, {
         connectionRetries: 5,
+        baseLogger: silentLogger,
     });
 
     await client.start({
@@ -106,23 +275,15 @@ async function start() {
         if (fs.existsSync(jsonPath)) {
             try { data = JSON.parse(fs.readFileSync(jsonPath, 'utf8')); } catch(e) {}
         }
-        
-        // Find existing channel and update count, or add new
         let existing = data.find(c => c.username === username);
         if (existing) {
             existing.repostCount = (existing.repostCount || 1) + 1;
             fs.writeFileSync(jsonPath, JSON.stringify(data, null, 2));
             fs.writeFileSync(jsPath, 'const discoveredChannels = ' + JSON.stringify(data, null, 2) + ';');
         } else if (!config.targetChannels.includes(username)) {
-            data.push({
-                username: username,
-                title: title || username,
-                foundIn: foundIn,
-                repostCount: 1,
-                subscribers: subs || 'Unknown',
-                description: desc || '',
-                discoveredAt: new Date().toLocaleString()
-            });
+            data.push({ username, title: title || username, foundIn, repostCount: 1,
+                subscribers: subs || 'Unknown', description: desc || '',
+                discoveredAt: new Date().toLocaleString() });
             fs.writeFileSync(jsonPath, JSON.stringify(data, null, 2));
             fs.writeFileSync(jsPath, 'const discoveredChannels = ' + JSON.stringify(data, null, 2) + ';');
             console.log(`🌟 Найден новый потенциальный канал через репост: @${username} (из @${foundIn})`);
@@ -131,18 +292,25 @@ async function start() {
 
     // Бесконечный цикл раз в 30 минут (с учетом времени прохода)
     while (true) {
+        // Читаем и инкрементируем счётчик перед каждым проходом
+        let passCounter;
+        try { passCounter = JSON.parse(fs.readFileSync(PASS_COUNTER_PATH, 'utf8')); } catch(_) { passCounter = { count: 0 }; }
+        passCounter.count = (passCounter.count || 0) + 1;
+        const isTopMemePass = (passCounter.count % TOP_MEME_EVERY_N === 0);
+        try { fs.writeFileSync(PASS_COUNTER_PATH, JSON.stringify(passCounter)); } catch(_) {}
+        console.log(`📊 Проход #${passCounter.count} | Топ-баян: ${isTopMemePass ? '✅ ДА' : `нет (след. через ${TOP_MEME_EVERY_N - (passCounter.count % TOP_MEME_EVERY_N)} пр.)`}`);
+
         const passStart = Date.now();
-        await processChannels(client, saveDiscoveredChannel);
+        await processChannels(client, saveDiscoveredChannel, isTopMemePass);
         const durationMs = Date.now() - passStart;
-        
+
         const waitTimeMs = Math.max(0, (30 * 60 * 1000) - durationMs);
-        
         console.log(`\n⏳ Проход занял ${(durationMs / 1000).toFixed(1)} сек. Ожидание ${(waitTimeMs / 1000 / 60).toFixed(1)} мин до следующего прохода...`);
         await new Promise(r => setTimeout(r, waitTimeMs));
     }
 }
 
-async function processChannels(client, saveDiscoveredChannel) {
+async function processChannels(client, saveDiscoveredChannel, isTopMemePass = false) {
     // Динамически читаем конфиг перед каждым проходом, чтобы админка могла им управлять на лету
     let currentConfig;
     try {
@@ -152,21 +320,44 @@ async function processChannels(client, saveDiscoveredChannel) {
         currentConfig = config; // fallback to the global one
     }
 
+    function parseRawSubs(raw) {
+        if (!raw) return 0;
+        const s = String(raw).replace(/\s/g,'').toUpperCase();
+        if (s.endsWith('M')) return Math.round(parseFloat(s) * 1_000_000);
+        if (s.endsWith('K')) return Math.round(parseFloat(s) * 1_000);
+        return parseInt(s) || 0;
+    }
+
     console.log(`\n[${new Date().toLocaleString()}] Начинаем сбор по ${currentConfig.targetChannels.length} каналам...`);
     
+    const ignoredPath = './ignored_channels.json';
+    let ignoredChannels = new Set();
+    if (fs.existsSync(ignoredPath)) {
+        try { ignoredChannels = new Set(JSON.parse(fs.readFileSync(ignoredPath, 'utf8'))); } catch(e){}
+    }
+    const saveIgnoredChannels = () => fs.writeFileSync(ignoredPath, JSON.stringify(Array.from(ignoredChannels), null, 2));
+
     let allMemes = [];
+    let hashCandidates = []; // посты для широкого хеширования (views>=100, react>=1)
     const memory = loadMemory(); // Channel Memory EMA
     let processedCount = 0;
     let skippedCount = 0; // каналы без постов за окно
 
+    // ── Сброс кластерной статистики перед проходом ──────────────────────────
+    clusters.resetPassStats();
+
     // ── Статистика прохода ──────────────────────────────────────────────────
     const stats = {
         totalPostsViewed: 0,  // все просмотренные посты (до фильтра)
-        totalPosts: 0,        // прошли фильтр (react≥3, views≥100)
+        totalPosts: 0,        // прошли фильтр (react≥min, views≥min)
         viral: 0,
         dupFiltered: 0,
         forwarded: 0,
-        lt1k: 0, lt5k: 0, lt10k: 0, lt20k: 0, gt20k: 0, unknown: 0
+        hashNew: 0,   // новых хешей добавлено за проход
+        hashDupes: 0, // баянов найдено при хешировании
+        lt1k: 0, lt5k: 0, lt10k: 0, lt20k: 0, gt20k: 0, unknown: 0,
+        // Кластерная статистика
+        clNano: 0, clMicro: 0, clSmall: 0, clMedium: 0, clBridge: 0
     };
     const dupHits = []; // трекаем самые копируемые мемы
 
@@ -182,18 +373,45 @@ async function processChannels(client, saveDiscoveredChannel) {
         try { subsCache = JSON.parse(fs.readFileSync(cachePath, 'utf8')); } catch(e){}
     }
 
-    // Временная граница: проверяем посты не старше N часов
-    const timeLimitMs = Date.now() - (currentConfig.hoursToCheck * 60 * 60 * 1000);
+    // Базовая временная граница (адаптируется по кластеру)
+    // Абсолютный cap: не старше 4 часов, чтобы nano/micro кластеры не тащили совсем старые посты
+    const MAX_POST_AGE_HOURS = 4;
+    const baseTimeLimitMs = Date.now() - (currentConfig.hoursToCheck * 60 * 60 * 1000);
 
     for (let channel of currentConfig.targetChannels) {
+        processedCount++;
+        if (processedCount % 100 === 0) {
+            botSendMessage(ADMIN_TG_ID, `⏳ Просканировано ${processedCount} каналов из ${currentConfig.targetChannels.length}`).catch(()=>{});
+        }
         try {
-            console.log(`📡 Парсинг канала: ${channel}...`);
+            console.log(`📡 Парсинг канала: ${channel}... (${processedCount}/${currentConfig.targetChannels.length})`);
             // Загружаем память именно этого канала (или null для первого прохода)
             let channelMem = memory[channel] || null;
+            // ── Определяем кластер канала для адаптивных параметров ──
+            const _chKeyPre = channel.toLowerCase().replace('@','');
+            const _cachedPre = subsCache[_chKeyPre];
+            const _subsPre = !_cachedPre ? 0 : (typeof _cachedPre === 'number' ? _cachedPre :
+                (_cachedPre.subs > 0 ? _cachedPre.subs : parseRawSubs(_cachedPre.rawSubs)));
+            const channelCluster = clusters.getCluster(_subsPre);
+            const historyLimit = clusters.clusterHistoryLimit(channelCluster);
+            const timeMult = clusters.clusterTimeMultiplier(channelCluster);
+            const timeLimitMs = Math.max(
+                Date.now() - (currentConfig.hoursToCheck * timeMult * 60 * 60 * 1000),
+                Date.now() - (MAX_POST_AGE_HOURS * 60 * 60 * 1000) // cap: не старше 4ч
+            );
+
+            // Трекаем кластер
+            clusters.countClusterChannel(channelCluster);
+            if (channelCluster === 'nano')   stats.clNano++;
+            else if (channelCluster === 'micro')  stats.clMicro++;
+            else if (channelCluster === 'small')  stats.clSmall++;
+            else if (channelCluster === 'medium') stats.clMedium++;
+            else                                  stats.clBridge++;
+
             const history = await client.invoke(
                 new Api.messages.GetHistory({
                     peer: getInputPeer(channel, Api),
-                    limit: 50,
+                    limit: historyLimit,
                 })
             );
 
@@ -243,14 +461,6 @@ async function processChannels(client, saveDiscoveredChannel) {
                     }
                 }
 
-                // Подписчики: из history.chats (бесплатно), затем из кэша c rawSubs
-                function parseRawSubs(raw) {
-                    if (!raw) return 0;
-                    const s = String(raw).replace(/\s/g,'').toUpperCase();
-                    if (s.endsWith('M')) return Math.round(parseFloat(s) * 1_000_000);
-                    if (s.endsWith('K')) return Math.round(parseFloat(s) * 1_000);
-                    return parseInt(s) || 0;
-                }
                 const pc = srcChat && srcChat.participantsCount > 0 ? srcChat.participantsCount : 0;
                 if (pc > 0 && !subsCache[chName]) subsCache[chName] = { subs: pc };
                 const cached = subsCache[chName];
@@ -272,54 +482,58 @@ async function processChannels(client, saveDiscoveredChannel) {
                     if (fwdChatInfo && fwdChatInfo.username) {
                         const username = fwdChatInfo.username;
                         
-                        const ignoredPath = './ignored_channels.json';
-                        let ignoredChannels = [];
-                        if (fs.existsSync(ignoredPath)) {
-                            try { ignoredChannels = JSON.parse(fs.readFileSync(ignoredPath, 'utf8')); } catch(e){}
-                        }
-
                         // Проверяем, не отслеживаем ли мы уже этот канал
                         const isAlreadyTracked = currentConfig.targetChannels.some(ch => 
                             ch.replace('@', '').toLowerCase() === username.toLowerCase()
                         );
 
-                        if (!ignoredChannels.includes(username) && !isAlreadyTracked) {
+                        if (!ignoredChannels.has(username) && !isAlreadyTracked) {
                             // Кэш подписчиков...
-                            if (subsCache[username] === undefined) {
+                            let fetchFailed = false;
+                            if (subsCache[username] === undefined || subsCache[username].rawSubs === 'Unknown' || subsCache[username].rawSubs === '?') {
                                 try {
                                     console.log(`🔍 Запрашиваем инфу о ${username} через t.me...`);
-                                    const r = await fetch('https://t.me/s/' + username);
-                                    const html = await r.text();
-                                    
-                                    const subsMatch = html.match(/<span class="counter_value">([^<]+)<\/span>\s*<span class="counter_type">subscribers<\/span>/);
-                                    const descMatch = html.match(/<div class="tgme_channel_info_description[^>]*>([\s\S]*?)<\/div>/);
-                                    
-                                    let subsRaw = subsMatch ? subsMatch[1] : '0';
-                                    let descRaw = descMatch ? descMatch[1].replace(/<[^>]+>/g, '').trim() : '';
-                                    
-                                    let parsedSubs = 0;
-                                    let strSubs = subsRaw.replace(/ /g, '').toUpperCase();
-                                    if (strSubs.endsWith('M')) parsedSubs = parseFloat(strSubs) * 1000000;
-                                    else if (strSubs.endsWith('K')) parsedSubs = parseFloat(strSubs) * 1000;
-                                    else parsedSubs = parseInt(strSubs) || 0;
-
-                                    subsCache[username] = { subs: parsedSubs, desc: descRaw, rawSubs: subsRaw };
-                                    fs.writeFileSync(cachePath, JSON.stringify(subsCache, null, 2));
-                                    await new Promise(r => setTimeout(r, 2000));
+                                    const info = await fetchChannelInfoHTTP(username);
+                                    if (info) {
+                                        subsCache[username] = { 
+                                            subs: info.subs, 
+                                            desc: info.desc, 
+                                            rawSubs: info.subs > 0 ? info.subs.toString() : 'Unknown' 
+                                        };
+                                        fs.writeFileSync(cachePath, JSON.stringify(subsCache, null, 2));
+                                        if (info.subs <= 0) fetchFailed = true;
+                                    } else {
+                                        console.log(`⚠️ Ошибка получения инфы о ${username}, пропускаем.`);
+                                        fetchFailed = true;
+                                    }
                                 } catch (e) {
                                     console.log(`⚠️ Ошибка получения инфы о ${username}, пропускаем.`);
-                                    subsCache[username] = { subs: 999999, desc: '', rawSubs: 'Unknown' };
-                                    fs.writeFileSync(cachePath, JSON.stringify(subsCache, null, 2));
+                                    fetchFailed = true;
+                                }
+                                
+                                if (fetchFailed) {
+                                    if (subsCache[username] === undefined) {
+                                        subsCache[username] = { subs: 999999, desc: '', rawSubs: 'Unknown' };
+                                        fs.writeFileSync(cachePath, JSON.stringify(subsCache, null, 2));
+                                    }
+                                    ignoredChannels.add(username);
+                                    saveIgnoredChannels();
                                 }
                             }
 
-                            let cacheData = subsCache[username];
-                            let subsCount = typeof cacheData === 'number' ? cacheData : (cacheData?.subs || 0);
-                            let desc = typeof cacheData === 'object' ? cacheData.desc : '';
-                            let rawSubs = typeof cacheData === 'object' ? cacheData.rawSubs : subsCount;
+                            if (!fetchFailed && !ignoredChannels.has(username)) {
+                                let cacheData = subsCache[username];
+                                let subsCount = typeof cacheData === 'number' ? cacheData : (cacheData?.subs || 0);
+                                let desc = typeof cacheData === 'object' ? cacheData.desc : '';
+                                let rawSubs = typeof cacheData === 'object' ? cacheData.rawSubs : subsCount;
 
-                            if (subsCount <= 10000) {
-                                saveDiscoveredChannel(username, fwdChatInfo.title, channel, rawSubs, desc);
+                                if (subsCount <= 10000) {
+                                    saveDiscoveredChannel(username, fwdChatInfo.title, channel, rawSubs, desc);
+                                } else {
+                                    // Отсеиваем каналы > 10000, добавляем в игнор чтобы не проверять их посты снова
+                                    ignoredChannels.add(username);
+                                    saveIgnoredChannels();
+                                }
                             }
                         }
                     }
@@ -331,6 +545,20 @@ async function processChannels(client, saveDiscoveredChannel) {
                                      msg.media.document.attributes.some(attr => attr.className === 'DocumentAttributeVideo' && attr.roundMessage);
 
                 if (!msg.media || msg.fwdFrom || isRoundVideo) continue;
+
+                // ── Широкий сбор для хеширования (views>=100, react>=1) ──────
+                // Собираем ВСЕ уникальные медиа-посты — не только вирусные кандидаты.
+                // isAlreadyProcessed — быстрый O(1) SQLite PRIMARY KEY lookup.
+                {
+                    const _v = msg.views || 0;
+                    const _r = msg.reactions ? (msg.reactions.results || []).reduce((s, r) => s + r.count, 0) : 0;
+                    const _isSticker = msg.media?.document?.attributes?.some?.(a => a.className === 'DocumentAttributeSticker');
+                    const _isAudio   = (msg.media?.document?.mimeType || '').startsWith('audio/');
+                    if (_v >= 100 && _r >= 1 && !_isSticker && !_isAudio && !isAlreadyProcessed(channel, msg.id)) {
+                        const _gid = msg.groupedId ? msg.groupedId.toString() : null;
+                        hashCandidates.push({ channel, peer: srcPeer, id: msg.id, media: msg.media, views: _v, groupedId: _gid });
+                    }
+                }
 
                 const views = msg.views || 0;
                 let reactions = 0;
@@ -344,83 +572,126 @@ async function processChannels(client, saveDiscoveredChannel) {
                 stats.totalPostsViewed++;
 
                 // ── Обновляем временной профиль для ВСЕХ постов (и до фильтра) ──
-                // Это критично: нам нужна норма для разного времени, включая обычные посты
                 {
                     const _ageMin = Math.max((Date.now() - msg.date * 1000) / 60000, 1);
                     const _vpMin  = views / (_ageMin + 10);
                     temporal.updateProfile(_vpMin, msg.date * 1000);
                 }
 
-                // Определяем размер канала ДО фильтра — для адаптивных порогов
+                // ── Кластерные пороги (вместо двойного isMicro/isSmall) ──
                 const _chNameF = channel.toLowerCase().replace('@','');
                 const _cachedF = subsCache[_chNameF];
                 const _subsF = !_cachedF ? 0 : (typeof _cachedF === 'number' ? _cachedF :
                     (_cachedF.subs > 0 ? _cachedF.subs : parseRawSubs(_cachedF.rawSubs)));
-                const isMicroChannel = _subsF > 0 && _subsF < 1000;
 
-                // Адаптивные пороги: микроканалы (< 1000 подп.) используют заниженные барьеры
-                // У них редко >100 просмотров быстро — важна ОТНОСИТЕЛЬНАЯ аномалия
-                const minViews     = isMicroChannel ? 15  : 100;
-                const minReactions = isMicroChannel ? 2   : 3;
+                // Обновляем кластерную статистику для КАЖДОГО поста (для Welford)
+                const _postAgeMin = Math.max((Date.now() - msg.date * 1000) / 60000, 1);
+                clusters.updateClusterPost(channelCluster, views, reactions + replies, replies, _postAgeMin, _subsF);
+
+                const { minViews, minReactions } = clusters.clusterMinThresholds(channelCluster);
 
                 // 1. Скорим с текущей памятью (до обновления EMA)
                 if (msg.date * 1000 >= timeLimitMs && reactions >= minReactions && views >= minViews) {
-                    // Фильтруем: только фото, GIF, видео (не аудио/голос/стикеры)
+                    // Фильтруем: только фото, GIF, видео (не аудио/голос/стикеры) + без активных ссылок
                     const mediaType = msg.media?.className || '';
                     const mimeType = msg.media?.document?.mimeType || '';
                     const isAudio = mimeType.startsWith('audio/') || mimeType === 'video/ogg';
                     const isVoice = msg.media?.document?.attributes?.some?.(a => a.className === 'DocumentAttributeAudio' && a.voice);
                     const isSticker = msg.media?.document?.attributes?.some?.(a => a.className === 'DocumentAttributeSticker');
 
-                    if (!msg.media || isAudio || isVoice || isSticker) {
-                        // Не мем (аудио/голос/стикер/нет медиа)
+                    // Проверка на активные ссылки (только реальные URL — без упоминаний @username)
+                    const hasActiveLink = (msg.entities && msg.entities.some(e => 
+                        e.className === 'MessageEntityUrl' || 
+                        e.className === 'MessageEntityTextUrl'
+                    )) || /https?:\/\/|t\.me\//i.test(msg.message || '');
+
+                    if (!msg.media || isAudio || isVoice || isSticker || hasActiveLink) {
+                        // Не мем (аудио/голос/стикер/нет медиа или содержит ссылку)
                     } else {
                         const subsRaw = subsCache[_chNameF] ? (subsCache[_chNameF].rawSubs || subsCache[_chNameF]) : null;
 
-                        let scoredCFS = { cfs: 0, rvi: 0, freshness: 0, sizeM: 1.2, momentumR: 0, momentumV: 0 };
-                        let scoredMicro = { mcvi: 0, viewsRatio: 0, erRatio: 0, freshness: 0, momentumV: 0 };
-
-                        // Временной поправочный коэффициент для нормализации velocity
-                        // По мере накопления данных становится точнее (factor=1.0 пока данных мало)
+                        // Временной поправочный коэффициент
                         const tFactor = temporal.getTemporalFactor(msg.date * 1000);
 
-                        if (isMicroChannel) {
-                            // Для микроканалов: оба скора (MCVI — основной, CFS — для совместимости)
-                            scoredMicro = calculateMicroVirality(views, reactions, replies, msg.date * 1000, channelMem, reactionResults, channel, msg.id, tFactor);
-                            // CFS тоже считаем, но с заниженным весом (для сортировки в общем пуле)
+                        // ── 5-кластерное скорирование ──
+                        let scoredCFS = { cfs: 0, rvi: 0, freshness: 0, sizeM: 1.2, momentumR: 0, momentumV: 0 };
+                        let scoredCluster = { ncvi: 0, mcvi: 0, scvi: 0, viewsRatio: 0, erRatio: 0, rpAnomaly: 0, erAnomaly: 0, clusterAnomaly: 0 };
+                        let clusterScore = 0; // нормализованный скор для сравнения между кластерами
+
+                        if (channelCluster === 'nano') {
+                            const nano = calculateNanoVirality(views, reactions, replies, msg.date * 1000, channelMem, _subsF, reactionResults, channel, msg.id, tFactor);
+                            scoredCluster.ncvi = nano.ncvi;
+                            scoredCluster.rpAnomaly = nano.rpAnomaly;
+                            scoredCluster.erAnomaly = nano.erAnomaly;
                             scoredCFS = calculateVirality(views, reactions, replies, msg.date * 1000, channelMem, subsRaw, reactionResults, channel, msg.id, tFactor);
+                            clusterScore = nano.ncvi * 10000;
+                            scoredCFS.momentumR = nano.momentumR;
+                            scoredCFS.momentumV = nano.momentumV;
+                            scoredCFS.freshness = nano.freshness;
+                        } else if (channelCluster === 'micro') {
+                            const micro = calculateMicroVirality(views, reactions, replies, msg.date * 1000, channelMem, _subsF, reactionResults, channel, msg.id, tFactor);
+                            scoredCluster.mcvi = micro.mcvi;
+                            scoredCluster.viewsRatio = micro.viewsRatio;
+                            scoredCluster.erRatio = micro.erRatio;
+                            scoredCluster.rpAnomaly = micro.rpAnomaly;
+                            scoredCFS = calculateVirality(views, reactions, replies, msg.date * 1000, channelMem, subsRaw, reactionResults, channel, msg.id, tFactor);
+                            clusterScore = micro.mcvi * 10000;
+                            scoredCFS.momentumR = micro.momentumR;
+                            scoredCFS.momentumV = micro.momentumV;
+                            scoredCFS.freshness = micro.freshness;
+                        } else if (channelCluster === 'small') {
+                            const small = calculateSmallVirality(views, reactions, replies, msg.date * 1000, channelMem, subsRaw, reactionResults, channel, msg.id, tFactor);
+                            scoredCluster.scvi = small.scvi;
+                            scoredCluster.clusterAnomaly = small.clusterAnomaly;
+                            scoredCFS = { cfs: small.cfsRaw, rvi: small.rvi, freshness: small.freshness, sizeM: small.sizeM, momentumR: small.momentumR, momentumV: small.momentumV };
+                            clusterScore = small.scvi;
+                        } else if (channelCluster === 'medium') {
+                            scoredCFS = adaptedMediumCFS(views, reactions, replies, msg.date * 1000, channelMem, subsRaw, reactionResults, channel, msg.id, tFactor);
+                            clusterScore = scoredCFS.cfs;
                         } else {
+                            // bridge — стандартный CFS
                             scoredCFS = calculateVirality(views, reactions, replies, msg.date * 1000, channelMem, subsRaw, reactionResults, channel, msg.id, tFactor);
+                            clusterScore = scoredCFS.cfs;
                         }
 
                         channelMemes.push({
                             channel,
                             peer: srcPeer,
-                            isSmall:  _subsF > 0 && _subsF < 2000,
-                            isMicro:  isMicroChannel,
+                            cluster:    channelCluster,
+                            isSmall:    channelCluster === 'small' || channelCluster === 'micro',
+                            isMicro:    channelCluster === 'micro',
+                            isNano:     channelCluster === 'nano',
                             id: msg.id,
                             date: msg.date,
                             views,
                             reactions,
                             replies,
-                            vi:       scoredCFS.cfs,
-                            rvi:      scoredCFS.rvi,
-                            freshness: scoredCFS.freshness,
-                            sizeM:    scoredCFS.sizeM,
-                            momentumR: scoredCFS.momentumR,
-                            momentumV: scoredCFS.momentumV,
-                            // Micro-метрики
-                            mcvi:       scoredMicro.mcvi,
-                            viewsRatio: scoredMicro.viewsRatio,
-                            erRatio:    scoredMicro.erRatio,
-                            media: msg.media
+                            subs:       _subsF,
+                            vi:         scoredCFS.cfs,
+                            clusterScore: clusterScore,
+                            rvi:        scoredCFS.rvi,
+                            freshness:  scoredCFS.freshness,
+                            sizeM:      scoredCFS.sizeM,
+                            momentumR:  scoredCFS.momentumR,
+                            momentumV:  scoredCFS.momentumV,
+                            // Кластерные метрики
+                            ncvi:           scoredCluster.ncvi,
+                            mcvi:           scoredCluster.mcvi,
+                            scvi:           scoredCluster.scvi,
+                            viewsRatio:     scoredCluster.viewsRatio,
+                            erRatio:        scoredCluster.erRatio,
+                            rpAnomaly:      scoredCluster.rpAnomaly,
+                            erAnomaly:      scoredCluster.erAnomaly,
+                            clusterAnomaly: scoredCluster.clusterAnomaly,
+                            media: msg.media,
+                            groupedId: msg.groupedId ? msg.groupedId.toString() : null
                         });
                         stats.totalPosts++;
                     }
                 }
 
                 // 2. Затем обновляем EMA-память (включая посты с 0 реакций — для точной нормы)
-                channelMem = updateMemory(channelMem, views, reactions, replies, msg.date * 1000);
+                channelMem = updateMemory(channelMem, views, reactions, replies, msg.date * 1000, _subsF, channelCluster);
 
             }
 
@@ -433,7 +704,7 @@ async function processChannels(client, saveDiscoveredChannel) {
                 allMemes.push(m);
             }
 
-            processedCount++;
+            // processedCount уже был увеличен в начале итерации (строка 262)
             // Успешный парсинг — сбрасываем CHANNEL_INVALID-счётчик для этого канала
             const _chLowOk = channel.toLowerCase().replace('@', '');
             if (channelErrors[_chLowOk]) delete channelErrors[_chLowOk];
@@ -446,15 +717,14 @@ async function processChannels(client, saveDiscoveredChannel) {
                 channelErrors[chLow] = (channelErrors[chLow] || 0) + 1;
                 const strikes = channelErrors[chLow];
                 if (strikes >= 3) {
-                    console.log(`\uD83D\uDDD1 \u041a\u0430\u043d\u0430\u043b @${channel} \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d 3\u0439 \u043f\u0440\u043e\u0445\u043e\u0434 \u043f\u043e\u0434\u0440\u044f\u0434 — \u0443\u0434\u0430\u043b\u044f\u0435\u043c \u0438\u0437 \u0438\u0441\u0442\u043e\u0447\u043d\u0438\u043a\u043e\u0432`);
-                    try {
-                        const cfgPath = path.join(__dirname, '../config.json');
-                        const cfgRaw  = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
-                        const key     = cfgRaw.targetChannels ? 'targetChannels' : 'channels';
-                        cfgRaw[key]   = (cfgRaw[key] || []).filter(c => c.toLowerCase().replace('@','') !== chLow);
-                        fs.writeFileSync(cfgPath, JSON.stringify(cfgRaw, null, 4));
-                        delete channelErrors[chLow]; // сбрасываем счётчик
-                    } catch (_) {}
+                    console.log(`🗑 Канал @${channel} недоступен 3й проход подряд — удаляем из источников`);
+                    const _chLowDel = chLow;
+                    updateConfig(cfg => {
+                        const key = cfg.targetChannels ? 'targetChannels' : 'channels';
+                        cfg[key] = (cfg[key] || []).filter(c => c.toLowerCase().replace('@','') !== _chLowDel);
+                        return cfg;
+                    });
+                    delete channelErrors[chLow]; // сбрасываем счётчик
                 } else {
                     console.log(`\u26A0\uFE0F @${channel}: CHANNEL_INVALID (\u0441трайк ${strikes}/3)`);
                 }
@@ -475,6 +745,45 @@ async function processChannels(client, saveDiscoveredChannel) {
     // Сохраняем счётчик ошибок
     try { fs.writeFileSync(errPath, JSON.stringify(channelErrors)); } catch(_){}
 
+    // ── HTTP-дозапрос для каналов с «нет данных» ─────────────────────────────
+    // После основного прохода проверяем каналы у которых нет данных о подписчиках
+    // Используем HTTP (не TG API) чтобы не ловить FloodWait
+    {
+        function parseRawSubsLocal(raw) {
+            if (!raw || raw === 'null' || raw === '?') return 0;
+            const s = String(raw).replace(/\s/g,'').toUpperCase();
+            if (s.endsWith('M')) return Math.round(parseFloat(s) * 1_000_000);
+            if (s.endsWith('K')) return Math.round(parseFloat(s) * 1_000);
+            return parseInt(s) || 0;
+        }
+        const unknownChannels = currentConfig.targetChannels.filter(ch => {
+            const key = ch.toLowerCase().replace('@', '');
+            const sc = subsCache[key];
+            if (!sc) return true;  // нет кэша совсем
+            const subs = sc.subs > 0 ? sc.subs : parseRawSubsLocal(sc.rawSubs);
+            return subs <= 0;  // нет ни subs ни parseable rawSubs
+        });
+        if (unknownChannels.length > 0) {
+            console.log(`\n🔍 HTTP-проверка ${unknownChannels.length} каналов без данных о подписчиках...`);
+            let httpFixed = 0;
+            for (const ch of unknownChannels) {
+                const key = ch.toLowerCase().replace('@', '');
+                try {
+                    const info = await fetchChannelInfoHTTP(key);
+                    if (info && info.subs > 0) {
+                        subsCache[key] = { subs: info.subs, desc: info.desc || '', rawSubs: String(info.subs) };
+                        httpFixed++;
+                    }
+                    await new Promise(r => setTimeout(r, 150)); // не перегружаем сервер
+                } catch(_) {}
+            }
+            if (httpFixed > 0) {
+                fs.writeFileSync(cachePath, JSON.stringify(subsCache));
+                console.log(`   ✅ Получены данные для ${httpFixed} каналов (HTTP)`);
+            }
+        }
+    }
+
     console.log(`\n📊 ИТОГИ ПРОХОДА:`);
     console.log(`   ├─ Всего каналов в конфиге: ${currentConfig.targetChannels.length}`);
     console.log(`   ├─ Успешно обработано: ${processedCount}`);
@@ -494,14 +803,39 @@ async function processChannels(client, saveDiscoveredChannel) {
     });
 
     // Сохраняем сырой пул (до RVI-фильтра) для очереди малых каналов
-    // Малые каналы могут иметь меньший RVI (нет накопленной памяти), но всё равно ценны
-    const allMemesRaw = [...allMemes];
+    // Тоже фильтруем уже пересланные — иначе они займут слоты micro/small/nano очередей
+    const allMemesRaw = allMemes.filter(m => !isAlreadyForwarded(m.channel, m.id));
+
+    // ── Хеширование в ФОНЕ: запускаем без await — форвард начинается немедленно ────────
+    ;(async () => {
+        const HASH_SCAN_LIMIT = 600;
+        const batchToHash = hashCandidates
+            .sort((a, b) => (b.views || 0) - (a.views || 0))
+            .slice(0, HASH_SCAN_LIMIT);
+        let hNew = 0, hDupe = 0;
+        console.log(`🔍 Hash scan (фон): ${batchToHash.length}/${hashCandidates.length} постов...`);
+        for (const cand of batchToHash) {
+            try {
+                const buf = await client.downloadMedia(cand.media, { thumb: 1 });
+                if (!buf || !Buffer.isBuffer(buf) || buf.length < 100) continue;
+                const dup = await isDuplicate(buf, cand.channel, cand.id, 10, cand.groupedId || null);
+                if (dup) hDupe++;
+                else { await saveToDatabase(buf, cand.id, cand.channel, cand.groupedId || null); hNew++; }
+            } catch (_) {}
+            await new Promise(r => setTimeout(r, 80));
+        }
+        console.log(`✅ Hash scan (фон) завершён: +${hNew} хешей, ${hDupe} баянов из ${batchToHash.length}`);
+    })().catch(e => console.error('❌ Hash scan bg error:', e.message));
+
 
     // Берём топ кандидатов: сортируем по CFS, отсекаем откровенно слабые (RVI < 1.5)
-    const MIN_RVI = 1.5;
-    const MAX_CANDIDATES = (config.maxMemesToForward || 5) * 3;
+    // Фильтруем уже пересланные ДО построения очередей чтобы они не занимали слоты
+    const TOTAL_BUDGET_PRE = config.maxMemesToForward || 50;
+    const MIN_RVI = 1.5; // порог вирусности
+    const MAX_CANDIDATES = 300; // широкий пул до очередей — очереди сами ограничивают по слотам
     const qualified = allMemes
         .filter(m => parseFloat(m.rvi) >= MIN_RVI)
+        .filter(m => !isAlreadyForwarded(m.channel, m.id)) // убираем уже пересланные до очередей
         .slice(0, MAX_CANDIDATES);
     stats.viral = qualified.length;
     console.log(`✅ Квалифицировано (RVI≥${MIN_RVI}): ${qualified.length} из ${allMemes.length}`);
@@ -509,7 +843,7 @@ async function processChannels(client, saveDiscoveredChannel) {
 
     // destPeer: сначала из entity_cache, потом единственный resolve через getEntity
     let destPeer = currentConfig.destinationChannel;
-    const _destKey = currentConfig.destinationChannel.replace('@','').toLowerCase();
+    const _destKey = String(currentConfig.destinationChannel).replace('@','').toLowerCase();
     const _destCached = entityCache[_destKey];
     if (_destCached && _destCached.id && _destCached.accessHash) {
         try {
@@ -522,7 +856,11 @@ async function processChannels(client, saveDiscoveredChannel) {
     } else {
         // Если нет в кэше — резолвим ОДИН РАЗ и сохраняем
         try {
-            const destEnt = await client.getEntity(currentConfig.destinationChannel);
+            // Для числового ID (приватный канал) передаём BigInt
+            const destArg = typeof currentConfig.destinationChannel === 'number'
+                ? BigInt(currentConfig.destinationChannel)
+                : currentConfig.destinationChannel;
+            const destEnt = await client.getEntity(destArg);
             if (destEnt && destEnt.id && destEnt.accessHash != null) {
                 entityCache[_destKey] = { id: destEnt.id.toString(), accessHash: destEnt.accessHash.toString() };
                 saveEntityCache();
@@ -561,55 +899,84 @@ async function processChannels(client, saveDiscoveredChannel) {
     let forwardedMomentum = 0;
     let forwardedSmall = 0;
     let forwardedMicro = 0;
+    let forwardedNano = 0;
+    let forwardedMedium = 0;
 
     if (!floodBanActive) {
-    // 1. CFS: топ 5 по Composite Final Score
-    const MAX_OLD = 5;
-    const oldQueue = allMemes.slice(0, MAX_OLD).map(m => ({ ...m, _slot: 'main' }));
-    const mainIds = new Set(oldQueue.map(m => m.channel + '/' + m.id));
+    // ── 5-кластерное квотирование (жёсткий лимит) ──
+    const TOTAL_BUDGET = config.maxMemesToForward || 50;
 
-    // 2. Моментум: посты с наибольшей динамикой роста прямо сейчас
-    // БАГ-ФИКС: убираем фильтр > 0 — на первых проходах у всех постов momentumR=0
-    // Сортируем по суммарной скорости, лучшие не из top-5 идут в momentum-слот
-    const MAX_MOMENTUM = (config.maxMemesToForward || 15) - MAX_OLD;
+    // Пропорциональное распределение бюджета (минимум 1 на кластер, чтобы не терять хвосты)
+    const MAX_BRIDGE   = Math.max(1, Math.ceil(TOTAL_BUDGET * 0.35)); // 35%
+    const MAX_MOMENTUM = Math.max(1, Math.ceil(TOTAL_BUDGET * 0.25)); // 25%
+    const MAX_MEDIUM   = Math.max(1, Math.ceil(TOTAL_BUDGET * 0.15)); // 15%
+    const MAX_SMALL    = Math.max(1, Math.ceil(TOTAL_BUDGET * 0.10)); // 10%
+    const MAX_MICRO    = Math.max(1, Math.ceil(TOTAL_BUDGET * 0.10)); // 10%
+    const MAX_NANO     = Math.max(1, Math.ceil(TOTAL_BUDGET * 0.05)); // 5%
+
+    // 1. Bridge (≥10k) — стандартный CFS, топ
+    const bridgeQueue = allMemes
+        .filter(m => m.cluster === 'bridge' || (!m.cluster && !m.isSmall && !m.isMicro && !m.isNano))
+        .slice(0, MAX_BRIDGE * 5)
+        .map(m => ({ ...m, _slot: 'main' }));
+    const mainIds = new Set(bridgeQueue.map(m => m.channel + '/' + m.id));
+
+    // 2. Моментум: посты с наибольшей динамикой роста (любой кластер)
     const momentumQueue = [...allMemes]
         .filter(m => !mainIds.has(m.channel + '/' + m.id))
         .sort((a, b) => (b.momentumR + b.momentumV) - (a.momentumR + a.momentumV) || b.vi - a.vi)
-        .slice(0, MAX_MOMENTUM)
+        .slice(0, MAX_MOMENTUM * 5)
         .map(m => ({ ...m, _slot: 'momentum' }));
-    
     const momentumActive = momentumQueue.filter(m => m.momentumR > 0 || m.momentumV > 0).length;
-    console.log(`📈 Momentum-очередь: ${momentumQueue.length} постов (${momentumActive} с активной динамикой)`);
     for (let m of momentumQueue) mainIds.add(m.channel + '/' + m.id);
 
-    // 3. Малые каналы: берём из СЫРОГО пула (до RVI-фильтра)
-    // У малых каналов может не быть достаточной истории для высокого RVI
-    const MAX_SMALL = config.maxSmallChannelMemes || 3;
-    const smallQueue = allMemesRaw
-        .filter(m => m.isSmall && !m.isMicro && !mainIds.has(m.channel + '/' + m.id))
+    // 3. Medium (3000–9999) — adapted CFS
+    const mediumQueue = allMemesRaw
+        .filter(m => m.cluster === 'medium' && !mainIds.has(m.channel + '/' + m.id))
         .sort((a, b) => b.vi - a.vi)
-        .slice(0, MAX_SMALL)
+        .slice(0, MAX_MEDIUM * 5)
+        .map(m => ({ ...m, _slot: 'medium' }));
+    for (let m of mediumQueue) mainIds.add(m.channel + '/' + m.id);
+
+    // 4. Small (1000–2999) — SCVI (гибрид CFS + Z-score)
+    const smallQueue = allMemesRaw
+        .filter(m => m.cluster === 'small' && !mainIds.has(m.channel + '/' + m.id))
+        .sort((a, b) => (b.scvi || b.vi) - (a.scvi || a.vi))
+        .slice(0, MAX_SMALL * 5)
         .map(m => ({ ...m, _slot: 'small' }));
     for (let m of smallQueue) mainIds.add(m.channel + '/' + m.id);
 
-    // 4. Микроканалы (< 1000 подп.): сортируем по MCVI — нашей относительной метрике
-    // Берём из сырого пула, MCVI >= 1.5 считается аномалией для микроканала
-    const MAX_MICRO = 3;
+    // 5. Micro (300–999) — MCVI v2 (кубический корень 3 аномалий)
     const microQueue = allMemesRaw
-        .filter(m => m.isMicro && !mainIds.has(m.channel + '/' + m.id))
+        .filter(m => m.cluster === 'micro' && !mainIds.has(m.channel + '/' + m.id))
         .sort((a, b) => b.mcvi - a.mcvi)
-        .slice(0, MAX_MICRO)
+        .slice(0, MAX_MICRO * 5)
         .map(m => ({ ...m, _slot: 'micro' }));
+    for (let m of microQueue) mainIds.add(m.channel + '/' + m.id);
 
-    const microActive = microQueue.filter(m => m.mcvi >= 1.5).length;
-    console.log(`📊 Очереди: CFS=${oldQueue.length} Momentum=${momentumQueue.length} Small=${smallQueue.length} Micro=${microQueue.length}(из них аномальных MCVI≥1.5: ${microActive})`);
-    const forwardQueue = [...oldQueue, ...momentumQueue, ...smallQueue, ...microQueue];
+    // 6. Nano (<300) — NCVI (Reach Penetration × ER аномалия)
+    const nanoQueue = allMemesRaw
+        .filter(m => m.cluster === 'nano' && !mainIds.has(m.channel + '/' + m.id))
+        .sort((a, b) => b.ncvi - a.ncvi)
+        .slice(0, MAX_NANO * 5)
+        .map(m => ({ ...m, _slot: 'nano' }));
+
+    console.log(`📊 Очереди: Bridge=${bridgeQueue.length} Mom=${momentumQueue.length}(${momentumActive}🔥) Med=${mediumQueue.length} Small=${smallQueue.length} Micro=${microQueue.length} Nano=${nanoQueue.length}`);
+    const forwardQueue = [...bridgeQueue, ...momentumQueue, ...mediumQueue, ...smallQueue, ...microQueue, ...nanoQueue];
 
     for (let meme of forwardQueue) {
-        if (meme._slot === 'main'     && forwardedCount    >= MAX_OLD)      continue;
+        const currentTotal = forwardedCount + forwardedMomentum + forwardedMedium + forwardedSmall + forwardedMicro + forwardedNano;
+        if (currentTotal >= TOTAL_BUDGET) {
+            console.log(`🎯 Достигнут общий лимит форвардов (${TOTAL_BUDGET}). Завершаем отбор.`);
+            break;
+        }
+
+        if (meme._slot === 'main'     && forwardedCount    >= MAX_BRIDGE)   continue;
         if (meme._slot === 'momentum' && forwardedMomentum >= MAX_MOMENTUM) continue;
+        if (meme._slot === 'medium'   && forwardedMedium   >= MAX_MEDIUM)   continue;
         if (meme._slot === 'small'    && forwardedSmall    >= MAX_SMALL)    continue;
         if (meme._slot === 'micro'    && forwardedMicro    >= MAX_MICRO)    continue;
+        if (meme._slot === 'nano'     && forwardedNano     >= MAX_NANO)     continue;
 
         try {
             // ── Быстрая дедупликация по channel+msgId (до скачивания медиа) ──
@@ -622,7 +989,7 @@ async function processChannels(client, saveDiscoveredChannel) {
             const buffer = await client.downloadMedia(meme.media, { thumb: 1 });
             if (!buffer) continue; 
 
-            const isDupe = await isDuplicate(buffer, meme.channel, meme.id);
+            const isDupe = await isDuplicate(buffer, meme.channel, meme.id, 10, meme.groupedId || null);
             if (isDupe) {
                 console.log(`♻️ БАЯН! @${meme.channel}/${meme.id} ← оригинал: @${isDupe.channelId}/${isDupe.messageId} (hitCount:${isDupe.hitCount})`);
                 // Фиксируем картинку в архиве даже если это баян — чтобы знать когда впервые встретилась
@@ -679,15 +1046,14 @@ async function processChannels(client, saveDiscoveredChannel) {
                     }
                 } else if (msg.includes('CHAT_FORWARDS_RESTRICTED')) {
                     console.log(`🔒 @${meme.channel} запрещает пересылку — добавляем в чёрный список`);
-                    // Автоматически удаляем из targetChannels
-                    try {
-                        const cfg = JSON.parse(fs.readFileSync('./config.json', 'utf8'));
-                        cfg.targetChannels = cfg.targetChannels.filter(c => c !== meme.channel);
+                    const _restrCh = meme.channel;
+                    updateConfig(cfg => {
+                        cfg.targetChannels = (cfg.targetChannels || []).filter(c => c !== _restrCh);
                         if (!cfg.restrictedChannels) cfg.restrictedChannels = [];
-                        if (!cfg.restrictedChannels.includes(meme.channel)) cfg.restrictedChannels.push(meme.channel);
-                        fs.writeFileSync('./config.json', JSON.stringify(cfg, null, 4));
-                        console.log(`   ✂️ @${meme.channel} удалён из парсинга, добавлен в restricted`);
-                    } catch(e) { console.log('   cfg update error:', e.message); }
+                        if (!cfg.restrictedChannels.includes(_restrCh)) cfg.restrictedChannels.push(_restrCh);
+                        return cfg;
+                    });
+                    console.log(`   ✂️ @${meme.channel} удалён из парсинга, добавлен в restricted`);
                 } else if (msg.includes('CHANNEL_PRIVATE')) {
                     console.log(`🚫 Приватный канал @${meme.channel} — пропускаем`);
                 } else if (msg.includes('ResolveUsername') || msg.includes('wait of') || msg.includes('FLOOD_WAIT')) {
@@ -726,11 +1092,15 @@ async function processChannels(client, saveDiscoveredChannel) {
             const er = meme.views > 0 ? ((meme.reactions / meme.views) * 100).toFixed(2) : 0;
             const slotName = meme._slot === 'main'     ? 'Вирусный (CFS) 🔥'
                            : meme._slot === 'momentum'  ? 'Гравитационный Моментум 🚀'
-                           : meme._slot === 'micro'     ? `Микроканал 🔬 (MCVI:${meme.mcvi} Views×${meme.viewsRatio} ER×${meme.erRatio})`
-                           :                              'Малый канал 🐣';
+                           : meme._slot === 'nano'      ? `Nano 🔬 (NCVI:${meme.ncvi} RP×${meme.rpAnomaly} ER×${meme.erAnomaly})`
+                           : meme._slot === 'micro'     ? `Micro 🧫 (MCVI:${meme.mcvi} RP×${meme.rpAnomaly} Views×${meme.viewsRatio})`
+                           : meme._slot === 'small'     ? `Small 🐣 (SCVI:${meme.scvi || meme.vi} Z:${meme.clusterAnomaly})`
+                           : meme._slot === 'medium'    ? `Medium 📊 (CFS:${meme.vi} boost)`
+                           :                              'Канал';
             const text = [
                 `🔥 <b>CFS: ${meme.vi}</b>  ·  RVI: ×${meme.rvi}  ·  Size: ×${meme.sizeM}  ·  Свежесть: ${Math.round(meme.freshness*100)}%`,
                 `📥 Алгоритм: <b>${slotName}</b>`,
+                `🏷 Кластер: ${meme.cluster || 'bridge'} (${meme.subs || '?'} подп.)`,
                 ``,
                 `📡 Источник: @${meme.channel}`,
                 `👁 Просмотров: <b>${meme.views.toLocaleString()}</b>  ·  ❤️ Реакций: <b>${meme.reactions}</b>  ·  ER: <b>${er}%</b>`,
@@ -742,18 +1112,24 @@ async function processChannels(client, saveDiscoveredChannel) {
             if (botRes && !botRes.ok) console.log(`   ⚠️ Bot API: ${botRes.description}`);
             else if (botRes && botRes.ok) console.log(`   📊 Статистика отправлена.`);
 
-            // Сохраняем в базу анти-баяна и в бинарный архив
-            await saveToDatabase(buffer, meme.id, meme.channel);
+            // Сохраняем в базу хешей (страховка — hash scan мог уже добавить), помечаем как пересланный
+            await saveToDatabase(buffer, meme.id, meme.channel, meme.groupedId || null);
+            markAsForwarded(meme.channel, meme.id);
             // Если archiveFilterDays=0, запись в архив ещё не была сделана выше — делаем сейчас
             if (!(currentConfig.archiveFilterDays > 0)) {
                 archive.checkAndRecord(buffer).catch(() => {});
             }
-            if (meme._slot === 'small')    forwardedSmall++;
+            if (meme._slot === 'nano')         forwardedNano++;
+            else if (meme._slot === 'micro')   forwardedMicro++;
+            else if (meme._slot === 'small')   forwardedSmall++;
+            else if (meme._slot === 'medium')  forwardedMedium++;
             else if (meme._slot === 'momentum') forwardedMomentum++;
-            else if (meme._slot === 'micro')    forwardedMicro++;
             else forwardedCount++;
             
             stats.forwarded++;
+
+            // Пауза между форвардами — защита от Bot API "Too Many Requests"
+            await new Promise(r => setTimeout(r, 3000));
 
         } catch (e) {
             console.log(`❌ Ошибка при пересылке:`, e.message);
@@ -765,63 +1141,177 @@ async function processChannels(client, saveDiscoveredChannel) {
     saveEntityCache();
 
     // ── Авто-добавление мем-каналов из seenIn ────────────────────────────────
-    // Каналы которые скопировали наши мемы 2+ раз, соответствуют критериям мем-канала
-    // и ещё не отслеживаются — автоматически добавляются в список источников
+    // Функция fetchChannelInfoHTTP перемещена наверх для глобального использования
+
+    // ── Авто-добавление: 5+ репостов → мем-слово → GetHistory → добавляем всегда, meme_format если прошёл ──
+    // ── Auto-discover: 5+ reposts → mem-keyword → GetHistory → always add, meme_format if format passed ──
     try {
-        const seenStats   = getSeenInStats(); // { channel: hitCount }
-        const CONFIG_PATH = path.join(__dirname, '../config.json');
-        const cfgRaw      = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
-        // Нормализуем текущий список каналов в нижний регистр без @
+        const seenStats   = getSeenInStats();
+        // Читаем свежий конфиг через updateConfig — один раз, потом применяем изменения атомарно
+        const cfgSnap     = JSON.parse(fs.readFileSync('./config.json', 'utf8'));
         const existingSet = new Set(
-            (cfgRaw.targetChannels || cfgRaw.channels || []).map(c => c.toLowerCase().replace('@','').trim())
+            (cfgSnap.targetChannels || cfgSnap.channels || []).map(c => String(c).toLowerCase().replace('@','').trim())
         );
         const destChannels = new Set(
-            [cfgRaw.destinationChannel, ...(cfgRaw.destinationChannels || [])]
-                .filter(Boolean).map(c => c.toLowerCase().replace('@',''))
+            [cfgSnap.destinationChannel, ...(cfgSnap.destinationChannels || [])]
+                .filter(Boolean).map(c => String(c).toLowerCase().replace('@',''))
         );
 
         const autoAdded = [];
         for (const [ch, hits] of Object.entries(seenStats)) {
-            if (hits < 2)                  continue; // менее 2 репостов
-            if (existingSet.has(ch))       continue; // уже в списке
-            if (destChannels.has(ch))      continue; // это наш канал-назначение
+            if (hits < 5)             continue; // min 5 reposts
+            if (existingSet.has(ch))  continue; // already tracked
+            if (destChannels.has(ch)) continue; // our destination
 
-            // Проверяем «mem» / «мем» в username
+            // Step 1: get info from cache or HTTP (нужно только для passCond1 — keyword)
+            // passCond2 (GetHistory) работает независимо через getEntity если нет в кэше
+            let entityEntry = entityCache[ch] || entityCache['@' + ch];
+            let scEntry     = subsCache[ch];
+            if (!scEntry || !scEntry.subs || !entityEntry || !entityEntry.title) {
+                const info = await fetchChannelInfoHTTP(ch);
+                if (info) {
+                    entityEntry = { id: '', accessHash: '', title: info.title || '' };
+                    entityCache[ch] = entityEntry;
+                    scEntry = { subs: info.subs || 0, desc: info.desc || '' };
+                    subsCache[ch] = scEntry;
+                    fs.writeFileSync(cachePath, JSON.stringify(subsCache));
+                    saveEntityCache();
+                }
+                // Не делаем continue: passCond2 может всё равно пройти через getEntity
+            }
+            // Rule: диапазон подписчиков 1000–20000
+            const subs = scEntry ? (scEntry.subs > 0 ? scEntry.subs : parseRawSubs(scEntry.rawSubs)) : 0;
+            if (subs < 1000 || subs > 20000) continue;
+
+            // ── Условие 1: мем-слово в username / title / description ─────────
+            const chTitle    = entityEntry ? (entityEntry.title || '') : '';
+            const chDesc     = scEntry ? (scEntry.desc || '') : '';
             const inUsername = /mem|мем/i.test(ch);
+            const inTitle    = /mem|мем/i.test(chTitle);
+            const inDesc     = /mem|мем/i.test(chDesc);
+            const passCond1  = inUsername || inTitle || inDesc;
 
-            // Проверяем в title из entityCache
-            const entityEntry = entityCache[ch] || entityCache['@' + ch];
-            const title       = (entityEntry && entityEntry.title) ? entityEntry.title : '';
-            const inTitle     = /mem|мем/i.test(title);
+            // Фильтр-исключение: нет слов anime, аниме, арты, арт, архитек
+            const excludeRegex = /anime|animе|аниме|\bарт\b|\bарты\b|архитек/i;
+            if (excludeRegex.test(chTitle) || excludeRegex.test(chDesc) || excludeRegex.test(ch)) continue;
 
-            // Проверяем в описании канала из subsCache
-            const scEntry = subsCache[ch];
-            const desc    = (scEntry && scEntry.desc) ? scEntry.desc : '';
-            const inDesc  = /mem|мем/i.test(desc);
+            // ── Условие 2: GetHistory → ≥85% одиночных медиа + <15% длинных текстов ──
+            let checkPeer = null;
+            // Защита от пустой строки '' (id из HTTP-фолбека не содержит реального ID)
+            if (entityEntry && entityEntry.id && entityEntry.id.length > 0 &&
+                entityEntry.accessHash && entityEntry.accessHash.length > 0) {
+                try {
+                    checkPeer = new Api.InputPeerChannel({
+                        channelId: BigInt(entityEntry.id),
+                        accessHash: BigInt(entityEntry.accessHash)
+                    });
+                } catch(_e1) {}
+            }
+            if (!checkPeer) {
+                try {
+                    const ent = await client.getEntity(ch);
+                    if (ent && ent.id && ent.accessHash != null) {
+                        entityCache[ch] = { id: ent.id.toString(), accessHash: ent.accessHash.toString(), title: ent.title || '' };
+                        saveEntityCache();
+                        checkPeer = new Api.InputPeerChannel({
+                            channelId: BigInt(ent.id.toString()),
+                            accessHash: BigInt(ent.accessHash.toString())
+                        });
+                        if (ent.participantsCount > 0) {
+                            subsCache[ch] = subsCache[ch] || {};
+                            subsCache[ch].subs = ent.participantsCount;
+                            fs.writeFileSync(cachePath, JSON.stringify(subsCache));
+                        }
+                    }
+                } catch(_e2) {}
+            }
 
-            if (!inUsername && !inTitle && !inDesc) continue;
+            let passCond2 = false;
+            if (checkPeer) {
+                try {
+                    const hist = await client.invoke(new Api.messages.GetHistory({
+                        peer: checkPeer, limit: 20, offsetId: 0,
+                        offsetDate: 0, addOffset: 0, maxId: 0, minId: 0, hash: BigInt(0)
+                    }));
+                    const msgs = (hist.messages || []).filter(m => m.className === 'Message');
+                    if (msgs.length >= 5) {
+                        let total = 0, singleMedia = 0, longText = 0;
+                        for (const m of msgs) {
+                            total++;
+                            const cls   = (m.media && m.media.className) ? m.media.className : '';
+                            const doc   = (m.media && m.media.document) ? m.media.document : null;
+                            const mime  = doc ? (doc.mimeType || '') : '';
+                            const attrs = doc ? (doc.attributes || []) : [];
+                            // groupedId is Long in gramJS — album if non-null and non-zero
+                            const gid     = m.groupedId;
+                            const isAlbum = (gid != null && gid.toString() !== '0');
+                            const isPhoto   = (cls === 'MessageMediaPhoto');
+                            const isGif     = attrs.some(a => a.className === 'DocumentAttributeAnimated');
+                            const isVideo   = (cls === 'MessageMediaDocument') && (mime.startsWith('video/') || isGif);
+                            const isVoice   = attrs.some(a => a.className === 'DocumentAttributeAudio' && a.voice);
+                            const isSticker = attrs.some(a => a.className === 'DocumentAttributeSticker');
+                            const isAudio   = !isGif && (mime.startsWith('audio/') || mime === 'video/ogg');
+                            // Single media: photo or video/gif, NOT album, NOT voice/sticker/audio
+                            if ((isPhoto || isVideo) && !isAlbum && !isVoice && !isSticker && !isAudio) singleMedia++;
+                            // Long caption > 100 chars
+                            if ((m.message || '').trim().length > 100) longText++;
+                        }
+                        passCond2 = (total >= 5) && ((singleMedia / total) >= 0.85) && ((longText / total) < 0.15);
+                    }
+                    await new Promise(r => setTimeout(r, 300));
+                } catch(_e3) {}
+            }
 
-            // Проверяем диапазон подписчиков: 100–10 000
-            const subs = !scEntry ? 0
-                : (typeof scEntry === 'number' ? scEntry
-                : (scEntry.subs > 0 ? scEntry.subs : parseRawSubs(scEntry.rawSubs)));
-            if (subs < 100 || subs > 10000) continue;
+            // Добавляем ТОЛЬКО если выполняются ОБА условия
+            if (!passCond1 || !passCond2) continue;
 
-            // Все критерии выполнены — добавляем
-            existingSet.add(ch);
-            // Добавляем в тот же массив что уже используется
-            if (cfgRaw.targetChannels) cfgRaw.targetChannels.push(ch);
-            else if (cfgRaw.channels)  cfgRaw.channels.push(ch);
-            autoAdded.push(`@${ch} (${subs} подп., репостов: ${hits}${inTitle ? ', title:"'+title+'"' : ''})`);
+            existingSet.add(ch); // предотвращаем повторное добавление в этом же проходе
+            const conds = [passCond1 ? 'keyword' : '', passCond2 ? 'meme_format ✅' : ''].filter(Boolean).join(' + ');
+            autoAdded.push({ ch, subs, hits, chTitle: inTitle ? chTitle : '', conds, passCond2 });
+
+
         }
+
 
         if (autoAdded.length > 0) {
-            fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfgRaw, null, 4));
-            console.log(`\n🤖 Авто-добавлено ${autoAdded.length} мем-канал(ов) в источники:`);
-            autoAdded.forEach(x => console.log('  ✚ ' + x));
+            await updateConfig(cfg => {
+                const key = cfg.targetChannels ? 'targetChannels' : 'channels';
+                const existingNorm = new Set((cfg[key] || []).map(c => String(c).toLowerCase().replace('@','').trim()));
+                for (const item of autoAdded) {
+                    if (!existingNorm.has(item.ch)) {
+                        cfg[key].push(item.ch);
+                        existingNorm.add(item.ch);
+                    }
+                    // Тег meme_format — только при Условии 2
+                    if (item.passCond2) {
+                        if (!cfg.tags) cfg.tags = {};
+                        cfg.tags[item.ch] = Array.from(new Set((cfg.tags[item.ch] || []).concat('meme_format')));
+                    }
+                }
+                return cfg;
+            });
+            // Обновляем discovered_channels.json для meme_format каналов
+            try {
+                const discPath = './discovered_channels.json';
+                if (fs.existsSync(discPath)) {
+                    const discData = JSON.parse(fs.readFileSync(discPath, 'utf8'));
+                    let changed = false;
+                    for (const item of autoAdded.filter(i => i.passCond2)) {
+                        const entry = discData.find(x => (x.username || '').toLowerCase().replace('@','') === item.ch);
+                        if (entry) {
+                            entry.tags = Array.from(new Set((entry.tags || []).concat('meme_format')));
+                            entry.isMeme = true;
+                            changed = true;
+                        }
+                    }
+                    if (changed) fs.writeFileSync(discPath, JSON.stringify(discData, null, 2));
+                }
+            } catch(_) {}
+            console.log('\n🤖 Авто-добавлено ' + autoAdded.length + ' мем-канал(ов) в источники:');
+            autoAdded.forEach(x => console.log('  ✪ @' + x.ch + ' (' + x.subs + ' подп., reposts: ' + x.hits + (x.chTitle ? ' "' + x.chTitle + '"' : '') + ') [' + x.conds + ']'));
         }
     } catch(e) {
-        console.log('⚠️ autoDiscover error:', e.message);
+        console.log('\u26a0\ufe0f autoDiscover error:', e.message);
     }
 
     // Сохраняем временной профиль (накапливается с каждым прогоном)
@@ -829,8 +1319,13 @@ async function processChannels(client, saveDiscoveredChannel) {
     const tStats = temporal.profileStats();
     console.log(`⏱ Temporal profile: ${tStats.totalSamples} семплов, активных часов: ${tStats.readyHours}/24, дней: ${tStats.readyDays}/7`);
 
-    const _fwdCount = forwardedCount + forwardedSmall + forwardedMomentum + forwardedMicro;
-    console.log(`\n✅ Итерация завершена. Переслано: ${_fwdCount} мемов (CFS: ${forwardedCount}, Моментум: ${forwardedMomentum}, Малые: ${forwardedSmall}, Микро: ${forwardedMicro}).`);
+    // Сохраняем кластерную статистику
+    clusters.saveClusterStats();
+    const clSummary = clusters.getClusterSummary();
+    console.log(`📊 Cluster stats: Nano=${clSummary.nano?.channels||0} Micro=${clSummary.micro?.channels||0} Small=${clSummary.small?.channels||0} Medium=${clSummary.medium?.channels||0} Bridge=${clSummary.bridge?.channels||0}`);
+
+    const _fwdCount = forwardedCount + forwardedSmall + forwardedMomentum + forwardedMicro + forwardedNano + forwardedMedium;
+    console.log(`\n✅ Итерация завершена. Переслано: ${_fwdCount} мемов (Bridge: ${forwardedCount}, Mom: ${forwardedMomentum}, Med: ${forwardedMedium}, Small: ${forwardedSmall}, Micro: ${forwardedMicro}, Nano: ${forwardedNano}).`);
     console.log(`⏰ Следующий прогон через ~30 мин (в ${new Date(Date.now() + 30*60*1000).toLocaleTimeString('ru')})`);
 
     // ── Итоговый отчёт в канал ───────────────────────────────────────────────
@@ -844,33 +1339,19 @@ async function processChannels(client, saveDiscoveredChannel) {
         ? (() => { try { return JSON.parse(fs.readFileSync(discoveredPath, 'utf8')).length; } catch(e) { return 0; } })()
         : 0;
 
-    const report = [
-        `📊 <b>Отчёт прохода ${timeStr} МСК</b>`,
-        ``,
-        `📡 <b>Каналов в базе:</b> ${currentConfig.targetChannels.length}`,
-        `✅ Обработано: ${processedCount}  ·  ❌ Ошибок: ${skippedCount}`,
-        `📌 В очереди на фильтрацию: ${discoveredCount} каналов`,
-        ``,
-        `📏 <b>Размеры каналов:</b>`,
-        `   до 1 000 подп.: ${stats.lt1k}`,
-        `   до 5 000 подп.: ${stats.lt5k}`,
-        `   до 10 000 подп.: ${stats.lt10k}`,
-        `   до 20 000 подп.: ${stats.lt20k}`,
-        `   свыше 20 000: ${stats.gt20k}`,
-        ...(stats.unknown > 0 ? [`   ❓ нет данных: ${stats.unknown}`] : []),
-        ``,
-        `🔍 <b>Посты:</b>`,
-        `   📖 Просмотрено всего: ${stats.totalPostsViewed}`,
-        `   ✔️ С реакциями (react≥3, views≥100): ${stats.totalPosts}`,
-        `   🔥 Вирусных (RVI≥1.5): ${stats.viral}`,
-        `   ♻️ Баяны: ${stats.dupFiltered}`,
-    ].join('\n');
+    const report = `📊 <b>Отчёт прохода ${timeStr} МСК</b>
+<blockquote expandable>Пабликов в базе: ${currentConfig.targetChannels.length}
+Проанализировано постов: ${stats.totalPostsViewed}
+Выдано постов: ${_fwdCount}</blockquote>`;
 
-    await botSendMessage(BOT_CHAT || currentConfig.destinationChannel, report)
-        .catch(e => console.error('Report send error:', e.message));
+    console.log(`📤 Отправляем отчёт (${report.length} символов)...`);
+    const reportRes = await botSendMessage(BOT_CHAT || currentConfig.destinationChannel, report)
+        .catch(e => { console.error('Report send error:', e.message); return null; });
+    if (reportRes && reportRes.ok) console.log('✅ Отчёт отправлен в канал.');
+    else if (reportRes) console.error('❌ Report bot error:', JSON.stringify(reportRes));
 
-    // Отправляем топ-2 самых копируемых мемов если есть баяны
-    if (stats.dupFiltered > 0) {
+    // Отправляем топ-2 самых копируемых мемов — раз в 4 прохода (~2 часа)
+    if (isTopMemePass) {
         try {
             const topDupes = getTopDuplicates(2);
             if (topDupes.length > 0) {
@@ -899,7 +1380,7 @@ async function processChannels(client, saveDiscoveredChannel) {
                         const totalSeen = (dupe.seenIn ? dupe.seenIn.length : 0);
                         // hitCount — количество новых совпадений за этот период (сброшен при выдаче)
                         // seenIn — накопленная история всех каналов где видели картинку
-                        const totalCount = totalSeen || dupe.hitCount || 1;
+                        const totalCount = Math.max(totalSeen, dupe.hitCount || 1);
 
                         let lines = [];
 

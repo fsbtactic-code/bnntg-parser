@@ -19,6 +19,7 @@
 
 const fs = require('fs');
 const MEMORY_PATH = './channel_memory.json';
+const clusters = require('./cluster_stats');
 
 // ─── Channel Memory ──────────────────────────────────────────────────────────
 
@@ -44,27 +45,34 @@ function saveMemory(memory) {
 
 /**
  * Обновляет EMA-память канала по одному посту.
- * α = 0.15 → учитываем примерно 6-7 последних наблюдений.
+ * α адаптивна по кластеру:
+ *   nano=0.30, micro=0.20, small=0.15, medium=0.10, bridge=0.08
  *
  * @param {Object|null} mem    — текущая запись памяти (null если первый раз)
  * @param {number} views
  * @param {number} reactions
  * @param {number} comments
  * @param {number} postDateMs
+ * @param {number} [subscribers]  — для Reach Penetration
+ * @param {string} [cluster]     — кластер канала
  * @returns {Object} обновлённая запись
  */
-function updateMemory(mem, views, reactions, comments, postDateMs) {
-    const α = 0.15;
+function updateMemory(mem, views, reactions, comments, postDateMs, subscribers = 0, cluster = 'bridge') {
+    const α = clusters.clusterAlpha(cluster);
     const ageMin = Math.max((Date.now() - postDateMs) / 60000, 1);
     const er       = (reactions + comments * 1.5) / Math.max(views, 1);
     const velocity = reactions / (ageMin + 5);
     const effectiveViews = Math.max(views, 1);
+    const rp = subscribers > 0 ? views / subscribers : 0;
 
     if (!mem || !mem.post_count) {
+        // Холодный старт: используем кластерные priors
+        const priors = clusters.getClusterPriors(cluster);
         return {
-            avg_er:       er,
-            avg_velocity: velocity,
-            avg_views:    effectiveViews,
+            avg_er:       er || priors.priorER,
+            avg_velocity: velocity || priors.priorVelocity,
+            avg_views:    effectiveViews || priors.priorViews,
+            avg_rp:       rp || (priors.priorRP || 0.3),
             post_count:   1,
             last_updated: Date.now()
         };
@@ -74,6 +82,7 @@ function updateMemory(mem, views, reactions, comments, postDateMs) {
         avg_er:       α * er           + (1 - α) * mem.avg_er,
         avg_velocity: α * velocity     + (1 - α) * mem.avg_velocity,
         avg_views:    α * effectiveViews + (1 - α) * mem.avg_views,
+        avg_rp:       rp > 0 ? (α * rp + (1 - α) * (mem.avg_rp || 0.3)) : (mem.avg_rp || 0.3),
         post_count:   mem.post_count + 1,
         last_updated: Date.now()
     };
@@ -339,35 +348,28 @@ function adaptiveThreshold(allScores) {
     return mean * multiplier;
 }
 
-// ─── Micro-Viral Detection Engine ────────────────────────────────────────────
+// ─── Nano-Viral Detection Engine (< 300 подп.) ──────────────────────────────
 //
-// Для каналов < 1000 подписчиков абсолютные числа (views, reactions) малы,
-// но пост может быть вирусным ОТНОСИТЕЛЬНО нормы этого канала.
-//
-// MCVI (Micro Channel Viral Index) = насколько пост аномален для своего канала:
-//   viewsRatio  = views / avg_views_канала    → в 3x больше обычного = сигнал
-//   erRatio     = er / avg_er_канала          → в 2x больше реакций на просмотр = сигнал
-//   velBonus    = velocity / avg_velocity     → рост быстрее обычного = бонус
-//   freshness   = exp decay с τ=90мин        → чуть медленнее стареет (посты выходят редко)
-//
-// Результат: MCVI ≥ 2.0 считается вирусным для микроканала.
+// NCVI: Reach Penetration — главная метрика.
+// views/subs > 1.0 → пост вышел за пределы аудитории → вирусный сигнал.
 
 /**
  * @param {number} views
  * @param {number} reactions
  * @param {number} comments
  * @param {number} postDateMs
- * @param {Object|null} channelMem  — EMA-память канала (из loadMemory)
+ * @param {Object|null} channelMem
+ * @param {number} subscribers
  * @param {Array|null} reactionResults
  * @param {string|null} channelName
  * @param {number|null} msgId
- * @returns {{ mcvi, viewsRatio, erRatio, freshness, momentumV }}
+ * @param {number} [temporalFactor]
+ * @returns {{ ncvi, rpAnomaly, erAnomaly, freshness, momentumV, momentumR }}
  */
-function calculateMicroVirality(views, reactions, comments, postDateMs, channelMem = null, reactionResults = null, channelName = null, msgId = null) {
-    if (!views || views === 0) return { mcvi: 0, viewsRatio: 0, erRatio: 0, freshness: 0, momentumV: 0 };
+function calculateNanoVirality(views, reactions, comments, postDateMs, channelMem = null, subscribers = 0, reactionResults = null, channelName = null, msgId = null, temporalFactor = 1.0) {
+    if (!views || views === 0) return { ncvi: 0, rpAnomaly: 0, erAnomaly: 0, freshness: 0, momentumV: 0, momentumR: 0 };
 
-    let momentumV = 0;
-    let momentumR = 0;
+    let momentumV = 0, momentumR = 0;
     if (channelName && msgId) {
         const mom = updateAndGetMomentum(channelName, msgId, views, reactions);
         momentumV = mom.instVelocityViews;
@@ -376,53 +378,194 @@ function calculateMicroVirality(views, reactions, comments, postDateMs, channelM
 
     const ageMin = Math.max((Date.now() - postDateMs) / 60000, 0.5);
     const er = (reactions + comments * 1.5) / Math.max(views, 1);
-    const velocity = views / (ageMin + 10); // просмотры/мин (защита малой базой)
 
-    // ── Относительные аномалии против нормы канала ───────────────────────
-    const avgViews    = (channelMem && channelMem.avg_views    > 0) ? channelMem.avg_views    : views * 0.5;
-    const avgER       = (channelMem && channelMem.avg_er       > 0) ? channelMem.avg_er       : 0.03;
-    const avgVelocity = (channelMem && channelMem.avg_velocity > 0) ? channelMem.avg_velocity : 0.1;
+    // Reach Penetration
+    const subs = Math.max(subscribers, 50); // floor 50 для защиты от деления на ноль
+    const rp = views / subs;
+    const avgRP = (channelMem && channelMem.avg_rp > 0) ? channelMem.avg_rp : 0.3;
+    const rpAnomaly = rp / Math.max(avgRP, 0.1);
 
-    // Отношение просмотров: ключевой сигнал для микроканала
-    const viewsRatio = views / Math.max(avgViews, 3);
+    // ER аномалия
+    const avgER = (channelMem && channelMem.avg_er > 0) ? channelMem.avg_er : 0.03;
+    const erAnomaly = er / Math.max(avgER, 0.01);
 
-    // Отношение ER: реакционность аномалия
-    const erRatio = er / Math.max(avgER, 0.01);
+    // Velocity с временной нормализацией
+    const velocityRaw = reactions / (ageMin + 3);
+    const adjVelocity = velocityRaw / Math.max(temporalFactor, 0.1);
+    const avgVelocity = (channelMem && channelMem.avg_velocity > 0) ? channelMem.avg_velocity : 0.05;
+    const velAnomaly = adjVelocity / Math.max(avgVelocity, 0.01);
+    const velBonus = 1 + 0.2 * Math.log2(Math.max(velAnomaly, 1));
 
-    // Бонус мгновенной скорости (momentum):
-    // Если пост набирает просмотры быстрее чем обычно — это прорыв
-    const velRatio = momentumV > 0
-        ? momentumV / Math.max(avgVelocity, 0.01)
-        : velocity / Math.max(avgVelocity, 0.01);
-    const velBonus = 1 + Math.log1p(Math.max(0, velRatio - 1)) * 0.3;
+    // Геометрическое среднее RP × ER аномалий
+    const anomaly = Math.sqrt(rpAnomaly * erAnomaly);
 
-    // Геометрическое среднее ключевых аномалий (устойчиво к выбросам)
-    const anomalyScore = Math.sqrt(viewsRatio * erRatio);
+    // Свежесть τ=120 мин (nano постят редко)
+    const fresh = Math.exp(-ageMin / 120);
 
-    // Свежесть: τ=90мин (микроканалы постят реже, свежесть важна дольше)
-    const fresh = Math.exp(-ageMin / 90);
-
-    // Бонус разнообразия реакций
     const divBonus = reactionDiversityBonus(reactionResults);
 
-    // MCVI = аномалия × бонус скорости × свежесть × разнообразие
-    const mcvi = anomalyScore * velBonus * fresh * divBonus;
+    const ncvi = anomaly * velBonus * fresh * divBonus;
 
     return {
-        mcvi:       Math.round(mcvi * 100) / 100,
-        viewsRatio: Math.round(viewsRatio * 100) / 100,
-        erRatio:    Math.round(erRatio * 100) / 100,
+        ncvi:       Math.round(ncvi * 100) / 100,
+        rpAnomaly:  Math.round(rpAnomaly * 100) / 100,
+        erAnomaly:  Math.round(erAnomaly * 100) / 100,
         freshness:  Math.round(fresh * 100) / 100,
         momentumV:  Math.round(momentumV * 100) / 100,
         momentumR:  Math.round(momentumR * 100) / 100,
     };
 }
 
+// ─── Micro-Viral Detection Engine v2 (300–999 подп.) ─────────────────────────
+//
+// MCVI v2: добавлен Reach Penetration к viewsRatio и erRatio.
+// Кубический корень из трёх аномалий → устойчивее к выбросам.
+
+/**
+ * @param {number} views
+ * @param {number} reactions
+ * @param {number} comments
+ * @param {number} postDateMs
+ * @param {Object|null} channelMem
+ * @param {number} subscribers
+ * @param {Array|null} reactionResults
+ * @param {string|null} channelName
+ * @param {number|null} msgId
+ * @param {number} [temporalFactor]
+ * @returns {{ mcvi, viewsRatio, erRatio, rpAnomaly, freshness, momentumV, momentumR }}
+ */
+function calculateMicroVirality(views, reactions, comments, postDateMs, channelMem = null, subscribers = 0, reactionResults = null, channelName = null, msgId = null, temporalFactor = 1.0) {
+    if (!views || views === 0) return { mcvi: 0, viewsRatio: 0, erRatio: 0, rpAnomaly: 0, freshness: 0, momentumV: 0, momentumR: 0 };
+
+    let momentumV = 0, momentumR = 0;
+    if (channelName && msgId) {
+        const mom = updateAndGetMomentum(channelName, msgId, views, reactions);
+        momentumV = mom.instVelocityViews;
+        momentumR = mom.instVelocityReactions;
+    }
+
+    const ageMin = Math.max((Date.now() - postDateMs) / 60000, 0.5);
+    const er = (reactions + comments * 1.5) / Math.max(views, 1);
+    const velocity = views / (ageMin + 10);
+
+    // ── Аномалии ──────────────────────────────────────────────────────────
+    const avgViews    = (channelMem && channelMem.avg_views    > 0) ? channelMem.avg_views    : views * 0.5;
+    const avgER       = (channelMem && channelMem.avg_er       > 0) ? channelMem.avg_er       : 0.03;
+    const avgVelocity = (channelMem && channelMem.avg_velocity > 0) ? channelMem.avg_velocity : 0.1;
+
+    const viewsRatio = views / Math.max(avgViews, 3);
+    const erRatio    = er / Math.max(avgER, 0.01);
+
+    // Reach Penetration (новое в v2)
+    const subs = Math.max(subscribers, 300);
+    const rp = views / subs;
+    const avgRP = (channelMem && channelMem.avg_rp > 0) ? channelMem.avg_rp : 0.3;
+    const rpAnomaly = rp / Math.max(avgRP, 0.1);
+
+    // Velocity бонус (нормализован по времени)
+    const adjVelocity = velocity / Math.max(temporalFactor, 0.1);
+    const velRatio = momentumV > 0
+        ? momentumV / Math.max(avgVelocity, 0.01)
+        : adjVelocity / Math.max(avgVelocity, 0.01);
+    const velBonus = 1 + Math.log1p(Math.max(0, velRatio - 1)) * 0.3;
+
+    // Кубический корень из трёх аномалий (устойчив к выбросам одного компонента)
+    const anomalyScore = Math.cbrt(viewsRatio * erRatio * rpAnomaly);
+
+    const fresh = Math.exp(-ageMin / 90);
+    const divBonus = reactionDiversityBonus(reactionResults);
+
+    const mcvi = anomalyScore * velBonus * fresh * divBonus;
+
+    return {
+        mcvi:       Math.round(mcvi * 100) / 100,
+        viewsRatio: Math.round(viewsRatio * 100) / 100,
+        erRatio:    Math.round(erRatio * 100) / 100,
+        rpAnomaly:  Math.round(rpAnomaly * 100) / 100,
+        freshness:  Math.round(fresh * 100) / 100,
+        momentumV:  Math.round(momentumV * 100) / 100,
+        momentumR:  Math.round(momentumR * 100) / 100,
+    };
+}
+
+// ─── Small Channel Viral Index (1000–2999 подп.) ─────────────────────────────
+//
+// SCVI: гибрид CFS (абсолютный) + кластерный Z-score (относительный).
+// 60% абсолютный + 40% относительный.
+
+/**
+ * @param {number} views
+ * @param {number} reactions
+ * @param {number} comments
+ * @param {number} postDateMs
+ * @param {Object|null} channelMem
+ * @param {string|number|null} rawSubs
+ * @param {Array|null} reactionResults
+ * @param {string|null} channelName
+ * @param {number|null} msgId
+ * @param {number} [temporalFactor]
+ * @returns {{ scvi, cfsRaw, clusterAnomaly, freshness, momentumR, momentumV }}
+ */
+function calculateSmallVirality(views, reactions, comments, postDateMs, channelMem = null, rawSubs = null, reactionResults = null, channelName = null, msgId = null, temporalFactor = 1.0) {
+    if (!views || views === 0) return { scvi: 0, cfsRaw: 0, clusterAnomaly: 0, freshness: 0, momentumR: 0, momentumV: 0 };
+
+    // CFS component (reuse calculateVirality)
+    const cfsResult = calculateVirality(views, reactions, comments, postDateMs, channelMem, rawSubs, reactionResults, channelName, msgId, temporalFactor);
+    const cfsRaw = cfsResult.cfs;
+
+    // Cluster Z-score component
+    const er = (reactions + comments * 1.5) / Math.max(views, 1);
+    const zScores = clusters.getClusterZScores('small', views, er);
+    const clusterAnomaly = Math.max(0, (zScores.viewsZ + zScores.erZ) / 2);
+
+    const ageMin = Math.max((Date.now() - postDateMs) / 60000, 0.5);
+    const fresh = Math.exp(-ageMin / 75);
+
+    // Композит: 60% CFS + 40% кластерная аномалия
+    const scvi = 0.6 * cfsRaw + 0.4 * clusterAnomaly * 10000 * fresh;
+
+    return {
+        scvi:           Math.round(scvi),
+        cfsRaw:         cfsRaw,
+        clusterAnomaly: Math.round(clusterAnomaly * 100) / 100,
+        freshness:      cfsResult.freshness,
+        momentumR:      cfsResult.momentumR,
+        momentumV:      cfsResult.momentumV,
+        rvi:            cfsResult.rvi,
+        sizeM:          cfsResult.sizeM,
+    };
+}
+
+// ─── Medium Adapted CFS (3000–9999 подп.) ────────────────────────────────────
+//
+// Стандартный CFS с усиленным sizeMultiplier и кластерным Bayesian prior.
+
+/**
+ * @returns {{ cfs, rvi, freshness, sizeM, momentumR, momentumV }}
+ */
+function adaptedMediumCFS(views, reactions, comments, postDateMs, channelMem = null, rawSubs = null, reactionResults = null, channelName = null, msgId = null, temporalFactor = 1.0) {
+    // Стандартный CFS
+    const result = calculateVirality(views, reactions, comments, postDateMs, channelMem, rawSubs, reactionResults, channelName, msgId, temporalFactor);
+
+    // Дополнительный sizeBoost для medium кластера
+    const subs = parseSubs(rawSubs);
+    if (subs && subs < 10000) {
+        const mediumBoost = 1 + Math.log10(Math.max(5000 / Math.max(subs, 1000), 1)) * 0.6;
+        result.cfs = Math.round(result.cfs * mediumBoost);
+        result.sizeM = Math.round((result.sizeM * mediumBoost) * 100) / 100;
+    }
+
+    return result;
+}
+
 // ─── Exports ─────────────────────────────────────────────────────────────────
 
 module.exports = {
     calculateVirality,
+    calculateNanoVirality,
     calculateMicroVirality,
+    calculateSmallVirality,
+    adaptedMediumCFS,
     updateMemory,
     loadMemory,
     saveMemory,

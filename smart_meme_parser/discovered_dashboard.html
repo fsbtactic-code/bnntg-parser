@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Banana Discovered Channels</title>
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --card-bg: #1e293b;
+            --text-color: #f8fafc;
+            --accent: #eab308; /* Банановый желтый */
+            --accent-hover: #facc15;
+            --border: #334155;
+            --success: #10b981;
+        }
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 40px 20px;
+        }
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+        .header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 30px;
+            border-bottom: 2px solid var(--border);
+            padding-bottom: 20px;
+        }
+        .header h1 {
+            margin: 0;
+            font-size: 28px;
+        }
+        .header .emoji {
+            font-size: 32px;
+            margin-right: 15px;
+        }
+        .stats {
+            background: var(--card-bg);
+            padding: 15px 25px;
+            border-radius: 12px;
+            margin-bottom: 30px;
+            display: inline-block;
+            border: 1px solid var(--border);
+        }
+        .stats span {
+            font-size: 24px;
+            font-weight: bold;
+            color: var(--accent);
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: var(--card-bg);
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+        }
+        th, td {
+            padding: 16px 20px;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+        th {
+            background: rgba(0,0,0,0.2);
+            font-weight: 600;
+            color: #cbd5e1;
+            text-transform: uppercase;
+            font-size: 13px;
+            letter-spacing: 0.05em;
+        }
+        tr:last-child td {
+            border-bottom: none;
+        }
+        tr:hover td {
+            background: rgba(255, 255, 255, 0.02);
+        }
+        a {
+            color: var(--accent);
+            text-decoration: none;
+            font-weight: 500;
+        }
+        a:hover {
+            color: var(--accent-hover);
+            text-decoration: underline;
+        }
+        .title {
+            font-weight: bold;
+            color: #fff;
+        }
+        .source {
+            color: #94a3b8;
+            font-size: 14px;
+        }
+        .source a {
+            color: #94a3b8;
+            text-decoration: none;
+        }
+        .source a:hover {
+            color: #fff;
+        }
+        .date {
+            color: #64748b;
+            font-size: 13px;
+        }
+        .empty {
+            text-align: center;
+            padding: 40px;
+            color: #94a3b8;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="header">
+        <div class="emoji">🍌</div>
+        <h1>Найденные каналы (из репостов)</h1>
+    </div>
+
+    <div class="stats" id="statsContainer">
+        Всего найдено: <span id="totalCount">0</span>
+    </div>
+
+    <table id="channelsTable">
+        <thead>
+            <tr>
+                <th>Название</th>
+                <th>Юзернейм</th>
+                <th>Кем репостнут</th>
+                <th>Дата находки</th>
+            </tr>
+        </thead>
+        <tbody id="tableBody">
+            <!-- Data will be populated here -->
+        </tbody>
+    </table>
+</div>
+
+<script>
+    // Пытаемся загрузить данные, если скрипт обнаружен
+    let channels = [];
+    try {
+        if (typeof discoveredChannels !== 'undefined') {
+            channels = discoveredChannels;
+        }
+    } catch(e) {
+        console.warn("Данные еще не созданы");
+    }
+
+    const tbody = document.getElementById('tableBody');
+    const totalCount = document.getElementById('totalCount');
+
+    totalCount.textContent = channels.length;
+
+    if (channels.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="4" class="empty">Пока ничего не найдено. Парсер еще работает...</td></tr>';
+    } else {
+        // Сортируем по дате (самые новые сверху)
+        channels.reverse().forEach(ch => {
+            const tr = document.createElement('tr');
+            
+            tr.innerHTML = `
+                <td class="title">${ch.title}</td>
+                <td><a href="https://t.me/${ch.username}" target="_blank">@${ch.username}</a></td>
+                <td class="source">из <a href="https://t.me/${ch.foundIn}" target="_blank">@${ch.foundIn}</a></td>
+                <td class="date">${ch.discoveredAt}</td>
+            `;
+            
+            tbody.appendChild(tr);
+        });
+    }
+</script>
+
+<!-- Скрипт с данными, который генерируется нашим парсером -->
+<script src="discovered_data.js" onerror="console.log('Файл данных пока не создан, ждем парсер.')"></script>
+<script>
+    // Если скрипт загрузился успешно после основного кода, обновляем таблицу
+    window.onload = function() {
+        if (typeof discoveredChannels !== 'undefined' && channels.length === 0 && discoveredChannels.length > 0) {
+            location.reload();
+        }
+    }
+</script>
+
+</body>
+</html>

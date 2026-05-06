@@ -92,6 +92,12 @@ input[type=number].inp::-webkit-inner-spin-button{-webkit-appearance:none}
 .ab:hover{border-color:#2a2a2a;color:#aaa}
 .ab.del:hover{border-color:#7f1d1d;color:#f87171;background:#140808}
 .ab.add:hover{border-color:#14532d;color:#4ade80;background:#081408}
+/* tags */
+.tag{display:inline-flex;align-items:center;gap:3px;background:rgba(168,85,247,.1);border:1px solid rgba(168,85,247,.22);color:#c084fc;border-radius:5px;font-size:9px;font-weight:600;padding:2px 7px;letter-spacing:.04em;text-transform:uppercase;cursor:pointer;transition:background .15s}
+.tag:hover{background:rgba(168,85,247,.2)}
+.tag-filter-btn{background:rgba(168,85,247,.08);border:1px solid rgba(168,85,247,.2);color:#a855f7;border-radius:7px;font-size:11px;font-weight:600;padding:6px 12px;cursor:pointer;font-family:'Inter',sans-serif;transition:all .15s}
+.tag-filter-btn.on{background:rgba(168,85,247,.22);color:#c084fc;border-color:rgba(168,85,247,.4)}
+.tag-filter-btn:hover{background:rgba(168,85,247,.18)}
 
 /* ── empty / toast ── */
 .empty{text-align:center;padding:60px 0;color:#222;font-size:13px}
@@ -121,7 +127,7 @@ input[type=number].inp::-webkit-inner-spin-button{-webkit-appearance:none}
   <div class="stats">
     <div class="stat"><div class="stat-lbl">Активных источников</div><div class="stat-val" id="s-active">—</div></div>
     <div class="stat"><div class="stat-lbl">Найдено каналов</div><div class="stat-val" id="s-disc">—</div></div>
-    <div class="stat"><div class="stat-lbl">Окно парсинга</div><div class="stat-val">30 мин</div></div>
+    <div class="stat" style="border-color:rgba(168,85,247,.15)"><div class="stat-lbl" style="color:#7c3aed">🏷 Meme Format</div><div class="stat-val" id="s-meme" style="color:#c084fc">—</div></div>
   </div>
 
   <!-- add -->
@@ -138,7 +144,8 @@ input[type=number].inp::-webkit-inner-spin-button{-webkit-appearance:none}
     </div>
     <div class="tbtools">
       <input class="inp" id="search" type="text" placeholder="Поиск..." style="width:170px;padding:8px 12px;font-size:12px" oninput="render()">
-      <button class="btn btn-dim" id="f-toggle" onclick="toggleF()" style="display:none">⚙ Фильтры</button>
+      <button class="tag-filter-btn" id="meme-filter" onclick="toggleMemeFilter()" title="Показать только meme_format каналы">🏷 meme_format</button>
+      <button class="btn btn-dim" id="f-toggle" onclick="toggleF()">⚙ Фильтры</button>
       <button class="btn btn-dim" id="enr-btn" onclick="doEnrich()" style="display:none" title="Обновить метаданные">↻</button>
     </div>
   </div>
@@ -155,7 +162,7 @@ input[type=number].inp::-webkit-inner-spin-button{-webkit-appearance:none}
       <div><div class="flbl">Подписчики до</div><input class="inp" id="f-smax" type="number" placeholder="∞" style="width:100%" oninput="render()"></div>
       <div><div class="flbl">Мин. репостов</div><input class="inp" id="f-rep" type="number" placeholder="1" style="width:100%" oninput="render()"></div>
     </div>
-    <div style="margin-top:10px">
+    <div style="margin-top:10px;display:flex;gap:8px;align-items:center">
       <button class="btn btn-dim" onclick="clearF()" style="font-size:11px;padding:6px 12px">Сбросить всё</button>
     </div>
   </div>
@@ -174,7 +181,13 @@ input[type=number].inp::-webkit-inner-spin-button{-webkit-appearance:none}
 
 <script>
 const A='/api/channels', D='/api/discovered';
-let active=[], disc=[], tab='active', sel=new Set(), lastFiltered=[];
+let active=[], disc=[], tab='active', sel=new Set(), lastFiltered=[], memeFilterOn=false;
+
+function toggleMemeFilter(){
+  memeFilterOn=!memeFilterOn;
+  document.getElementById('meme-filter').classList.toggle('on',memeFilterOn);
+  render();
+}
 
 // toast
 function toast(msg,ok=true){
@@ -233,6 +246,7 @@ function render(){
     const de=(item.description||'').toLowerCase();
     const sn=parseSubs(item.subscribers);
     const rc=item.count||1;
+    const itags=item.tags||[];
     if(q&&!ch.includes(q)&&!ti.includes(q)&&!de.includes(q)) return false;
     if(fu&&!ch.includes(fu)) return false;
     if(ft&&!ti.includes(ft)) return false;
@@ -240,6 +254,7 @@ function render(){
     if(fsmin!==null&&(sn===null||sn<fsmin)) return false;
     if(fsmax!==null&&(sn!==null&&sn>fsmax)) return false;
     if(frep!==null&&rc<frep) return false;
+    if(memeFilterOn&&!itags.includes('meme_format')) return false;
     return true;
   });
 
@@ -268,12 +283,14 @@ function render(){
 
     const repostLine=isD?`<div class="meta-reposts${repHot?' hot':''}" title="Сколько раз канал встречался в репостах">${repHot?'🔥':''}Репостов: ${repCount}</div>`:'';
 
+    const tagBadges=(item.tags||[]).map(t=>`<span class="tag" onclick="activateTag('${t}')" title="Фильтр по тегу">🏷 ${t}</span>`).join('');
+
     return `<div class="card${isSel?' sel':''}" id="row-${ch}">
       ${chkHtml}
       <div class="ava">${letter}</div>
       <div class="info">
         <div class="info-top">
-          <a class="chname" href="https://t.me/${ch}" target="_blank">${nm}</a>${activeBadge}
+          <a class="chname" href="https://t.me/${ch}" target="_blank">${nm}</a>${activeBadge}${tagBadges}
         </div>
         <div class="chuser">@${ch}</div>
         ${item.description?`<div class="chdesc">${item.description}</div>`:''}
@@ -286,6 +303,11 @@ function render(){
       <div class="acts">${acts}</div>
     </div>`;
   }).join('');
+}
+
+// tag filter click
+function activateTag(tag){
+  if(tag==='meme_format'){ memeFilterOn=true; document.getElementById('meme-filter').classList.add('on'); render(); }
 }
 
 // selection
@@ -374,6 +396,9 @@ async function load(){
     disc=dd.discovered||[];
     document.getElementById('s-active').textContent=active.length;
     document.getElementById('s-disc').textContent=disc.length;
+    // count meme_format across both lists
+    const memeCount=[...active,...disc].filter(i=>(i.tags||[]).includes('meme_format')).length;
+    document.getElementById('s-meme').textContent=memeCount||'—';
     document.getElementById('cnt-a').textContent=active.length;
     const b=document.getElementById('cnt-d');
     if(disc.length){b.textContent=disc.length;b.style.display='';}

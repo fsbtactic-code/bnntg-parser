@@ -34,21 +34,23 @@ function hammingBigInt(a, b) {
     return count;
 }
 
-// Вычисляет pHash как BigInt (бит i = 1 если pixel[i] >= среднего)
+// Вычисляет dHash (Difference Hash) 64 бита. Гораздо точнее aHash.
 async function computeHash(buffer) {
     const image = await Jimp.read(buffer);
-    image.resize(8, 8).grayscale();
-    let total = 0;
-    const pixels = [];
-    image.scan(0, 0, 8, 8, function(x, y, idx) {
-        const v = this.bitmap.data[idx];
-        total += v;
-        pixels.push(v);
-    });
-    const avg = total / 64;
+    // Для dHash нужно 9x8
+    image.resize(9, 8).grayscale();
     let hash = 0n;
-    for (let i = 0; i < 64; i++) {
-        if (pixels[i] >= avg) hash |= (1n << BigInt(i));
+    let bitIndex = 0n;
+    
+    for (let y = 0; y < 8; y++) {
+        for (let x = 0; x < 8; x++) {
+            const pLeft = image.bitmap.data[(y * 9 + x) * 4];
+            const pRight = image.bitmap.data[(y * 9 + x + 1) * 4];
+            if (pLeft > pRight) {
+                hash |= (1n << bitIndex);
+            }
+            bitIndex++;
+        }
     }
     return hash;
 }

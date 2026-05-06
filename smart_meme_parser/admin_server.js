@@ -12,7 +12,7 @@ const CHANNEL_CACHE_PATH = path.join(__dirname, 'channel_cache.json');
 
 app.use(cors());
 app.use(express.json());
-app.use(express.static('public'));
+app.use(express.static(path.join(__dirname, 'public')));
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -144,10 +144,11 @@ function loadMetaCache() {
     // Merge into our metaCache format
     for (const [k, v] of Object.entries(saved)) {
         if (!metaCache[k]) {
+            const subsVal = v.rawSubs || (v.subs > 0 ? String(v.subs) : null) || '?';
             metaCache[k] = {
                 title: v.title || k,
-                description: v.description || '',
-                subscribers: v.rawSubs || v.subscribers || '?',
+                description: v.description || v.desc || '',
+                subscribers: subsVal,
                 ts: v.ts || 0
             };
         }
@@ -177,9 +178,19 @@ async function runEnrichQueue() {
         try {
             const meta = await scrapeChannelMeta(username);
             metaCache[username] = { ...meta, ts: Date.now() };
-            // Persist to channel_cache.json
+            // Persist to channel_cache.json — preserve existing rawSubs if new scrape returned nothing
             const cache = readCache();
-            cache[username] = { rawSubs: meta.subscribers, description: meta.description, title: meta.title, ts: Date.now() };
+            const prev = cache[username] || {};
+            const newRawSubs = (meta.subscribers && meta.subscribers !== '?' && meta.subscribers !== null)
+                ? meta.subscribers
+                : (prev.rawSubs || prev.subs || null);
+            cache[username] = {
+                ...prev,
+                rawSubs: newRawSubs,
+                description: meta.description || prev.description || '',
+                title: meta.title || prev.title || username,
+                ts: Date.now()
+            };
             writeCache(cache);
             // Update discovered_channels.json entries too
             const disc = readDiscovered();
@@ -222,11 +233,13 @@ setTimeout(scheduleStartupEnrich, 3000); // Start after 3s to not block startup
 app.get('/api/channels', (req, res) => {
     const config = readConfig();
     const channels = config.targetChannels || [];
+    const tags = config.tags || {};
     const richChannels = channels.map(c => ({
         channel: c,
         title: metaCache[c] ? metaCache[c].title : c,
         description: metaCache[c] ? metaCache[c].description : '',
-        subscribers: metaCache[c] ? metaCache[c].subscribers : '?'
+        subscribers: metaCache[c] ? metaCache[c].subscribers : '?',
+        tags: tags[c] || []
     }));
     res.json({ channels: richChannels });
 });
@@ -307,12 +320,17 @@ app.get('/api/discovered', (req, res) => {
             meta[item.username] = {
                 title: item.title || item.username,
                 subscribers: item.subscribers || '?',
-                description: item.description || ''
+                description: item.description || '',
+                tags: item.tags || []
             };
         } else {
             if (item.subscribers && item.subscribers !== 'Unknown' && item.subscribers !== '?') meta[item.username].subscribers = item.subscribers;
             if (item.description) meta[item.username].description = item.description;
             if (item.title) meta[item.username].title = item.title;
+            // Merge tags
+            if (item.tags && item.tags.length > 0) {
+                meta[item.username].tags = [...new Set([...(meta[item.username].tags || []), ...item.tags])];
+            }
         }
         // Override with fresh in-memory cache if available
         if (metaCache[item.username]) {
@@ -328,7 +346,8 @@ app.get('/api/discovered', (req, res) => {
         title: meta[username].title,
         subscribers: meta[username].subscribers,
         description: meta[username].description,
-        count: counts[username]
+        count: counts[username],
+        tags: meta[username].tags || []
     })).sort((a, b) => b.count - a.count);
 
     res.json({ discovered: list });
