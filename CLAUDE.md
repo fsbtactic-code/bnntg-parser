@@ -21,8 +21,11 @@
    - BOT_TOKEN от BotFather
    - BOT_CHANNEL_ID канала (с -100 впереди)
 6. Запиши мои ответы в config.json и .env
-7. Запусти node auth.js для авторизации Telegram аккаунта
-8. После успешной авторизации запусти парсер через PM2: pm2 start index.js --name meme-parser && pm2 save
+7. Запусти node gen_session.js для авторизации Telegram аккаунта
+8. После успешной авторизации запусти процессы через PM2: 
+   pm2 start index.js --name meme-parser
+   pm2 start admin_server.js --name meme-admin
+   pm2 save
 9. Покажи статус pm2 list
 ```
 
@@ -33,7 +36,7 @@
 - ✅ Установит зависимости (`npm install`)
 - ✅ Создаст `config.json` и `.env` из шаблонов
 - ✅ Поможет с авторизацией MTProto сессии
-- ✅ Запустит парсер через PM2 в фоне
+- ✅ Запустит парсер и админку через PM2 в фоне
 - ✅ Проверит что всё работает через логи
 
 ## Минимальные требования для сервера
@@ -56,9 +59,12 @@ sudo apt-get install -y nodejs
 ```
 bnntg-parser/
 └── smart_meme_parser/
-    ├── index.js          ← запускается PM2
-    ├── admin_server.js   ← веб-панель :8333
+    ├── index.js          ← Главный движок (PM2: meme-parser)
+    ├── cleaner_deep.js   ← Клинер ботов с обходом лимитов API
+    ├── admin_server.js   ← Веб-панель :8333 (PM2: meme-admin)
+    ├── dedup.js          ← Анти-баян (124x124 pHash)
+    ├── virality.js       ← Математика CFS, RVI, EMA
     ├── config.json       ← твои каналы и ключи
     ├── .env              ← токен бота
-    └── session.txt       ← MTProto сессия (создаётся при auth)
+    └── session.txt       ← MTProto сессия (создаётся при gen_session)
 ```
