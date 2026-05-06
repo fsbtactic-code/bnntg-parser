@@ -372,7 +372,10 @@ async function processChannels(client, saveDiscoveredChannel, isTopMemePass = fa
     const MAX_POST_AGE_HOURS = 4;
     const baseTimeLimitMs = Date.now() - (currentConfig.hoursToCheck * 60 * 60 * 1000);
 
-    for (let channel of currentConfig.targetChannels) {
+    const batchSize = 3;
+    for (let i = 0; i < currentConfig.targetChannels.length; i += batchSize) {
+        const batch = currentConfig.targetChannels.slice(i, i + batchSize);
+        await Promise.all(batch.map(async (channel) => {
         processedCount++;
         if (processedCount % 100 === 0) {
             botSendMessage(ADMIN_TG_ID, `⏳ Просканировано ${processedCount} каналов из ${currentConfig.targetChannels.length}`).catch(()=>{});
@@ -725,8 +728,12 @@ async function processChannels(client, saveDiscoveredChannel, isTopMemePass = fa
             skippedCount++;
         }
         
-        // Маленькая пауза для безопасности от FloodWait (т.к. каналов > 120)
-        await new Promise(r => setTimeout(r, 200));
+        // Маленькая пауза внутри батча (рандомизация)
+        await new Promise(r => setTimeout(r, 100 + Math.random() * 200));
+        })); // Конец Promise.all
+        
+        // Пауза между батчами для безопасности от FloodWait
+        await new Promise(r => setTimeout(r, 1000));
     }
 
     // Сохраняем всю Channel Memory после прохода
@@ -1125,7 +1132,7 @@ async function processChannels(client, saveDiscoveredChannel, isTopMemePass = fa
 
     // Функция fetchChannelInfoHTTP перемещена наверх для глобального использования
 
-    try {
+    if (false) try {
         const seenStats   = getSeenInStats();
         // Читаем свежий конфиг через updateConfig — один раз, потом применяем изменения атомарно
         const cfgSnap     = JSON.parse(fs.readFileSync('./config.json', 'utf8'));
