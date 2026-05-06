@@ -25,7 +25,6 @@ const path = require('path');
 
 const STATS_PATH = path.join(__dirname, 'cluster_stats.json');
 
-// ── Кластерные границы ──────────────────────────────────────────────────────
 
 const CLUSTER_BOUNDS = {
     nano:   { min: 1,     max: 299   },
@@ -49,7 +48,6 @@ function getCluster(subs) {
     return 'bridge';
 }
 
-// ── Параметры кластеров ─────────────────────────────────────────────────────
 
 /**
  * EMA α коэффициент для Channel Memory по кластеру.
@@ -105,7 +103,6 @@ function clusterFreshnessTau(cluster) {
     return taus[cluster] || 60;
 }
 
-// ── Welford's Online Algorithm ──────────────────────────────────────────────
 
 function _defaultWelford() {
     return { n: 0, mean: 0, m2: 0 };
@@ -124,7 +121,6 @@ function welfordStd(state) {
     return Math.sqrt(state.m2 / state.n);
 }
 
-// ── Cluster Stats ───────────────────────────────────────────────────────────
 
 function _defaultClusterStat() {
     return {
@@ -250,7 +246,6 @@ function countClusterChannel(cluster) {
     stats[cluster].channels++;
 }
 
-// ── Getters ──────────────────────────────────────────────────────────────────
 
 function _median(arr) {
     if (!arr || arr.length === 0) return 0;
@@ -315,7 +310,6 @@ function getClusterSummary() {
     return summary;
 }
 
-// ── Init ──────────────────────────────────────────────────────────────────────
 loadClusterStats();
 
 module.exports = {

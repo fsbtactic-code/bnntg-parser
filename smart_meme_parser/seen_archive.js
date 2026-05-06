@@ -55,7 +55,6 @@ async function computeHash(buffer) {
     return hash;
 }
 
-// ─── In-memory индекс: BigInt → unix seconds ─────────────────────────────────
 // Инициализируется при первом require()
 let archiveIndex = new Map(); // hash → firstSeenTimestamp (seconds)
 

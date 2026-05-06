@@ -1,4 +1,3 @@
-    // ── Auto-discover: 5+ reposts → mem-keyword → GetHistory → always add, meme_format if format passed ──
     try {
         const seenStats   = getSeenInStats();
         const CONFIG_PATH = './config.json';

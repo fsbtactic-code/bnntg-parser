@@ -14,7 +14,6 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
 
 function readConfig() {
     try { return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); }
@@ -51,7 +50,6 @@ function writeCache(data) {
     fs.writeFileSync(CHANNEL_CACHE_PATH, JSON.stringify(data, null, 2));
 }
 
-// ─── Playwright scraper ──────────────────────────────────────────────────────
 
 let browser = null;
 
@@ -134,7 +132,6 @@ async function scrapeChannelMeta(username) {
     }
 }
 
-// ─── Meta cache & enrichment ─────────────────────────────────────────────────
 
 let metaCache = {}; // in-memory: { username: { title, description, subscribers, ts } }
 
@@ -228,7 +225,6 @@ function scheduleStartupEnrich() {
 }
 setTimeout(scheduleStartupEnrich, 3000); // Start after 3s to not block startup
 
-// ─── API: Channels ───────────────────────────────────────────────────────────
 
 app.get('/api/channels', (req, res) => {
     const config = readConfig();
@@ -302,7 +298,6 @@ app.post('/api/channels/bulk', (req, res) => {
     res.json({ success: true, added, total: config.targetChannels.length });
 });
 
-// ─── API: Discovered ─────────────────────────────────────────────────────────
 
 app.get('/api/discovered', (req, res) => {
     const raw = readDiscovered();
@@ -390,7 +385,6 @@ app.post('/api/enrich', (req, res) => {
     res.json({ success: true, queued: count });
 });
 
-// ─── Start ───────────────────────────────────────────────────────────────────
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Banana Admin Panel running on port ${PORT}`);

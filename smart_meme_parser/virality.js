@@ -21,7 +21,6 @@ const fs = require('fs');
 const MEMORY_PATH = './channel_memory.json';
 const clusters = require('./cluster_stats');
 
-// ─── Channel Memory ──────────────────────────────────────────────────────────
 
 /**
  * Загружает всю память каналов из файла.
@@ -88,7 +87,6 @@ function updateMemory(mem, views, reactions, comments, postDateMs, subscribers =
     };
 }
 
-// ─── Core Scoring ────────────────────────────────────────────────────────────
 
 /**
  * Конвертирует строку подписчиков ("1.2K", "500K", "3M") в число.
@@ -155,7 +153,6 @@ function reactionDiversityBonus(reactionResults) {
     return Math.min(1 + (activeTypes - 1) * 0.08, 1.5);
 }
 
-// ─── Post Snapshots (Dynamic Virality) ───────────────────────────────────────
 const SNAPSHOTS_PATH = './post_snapshots.json';
 
 function loadSnapshots() {
@@ -264,7 +261,6 @@ function calculateVirality(views, reactions, comments, postDateMs, channelMem = 
 
     const ageMin   = Math.max((Date.now() - postDateMs) / 60000, 0.5);
     
-    // ── Адаптивное байесовское сглаживание ───────────────────────────────────
     // bayesianC зависит от размера канала: маленький пул → сильнее сглаживаем
     // Для 1000 просмотров: C=50 (почти не влияет). Для 100 просмотров: C=200 (умеренно).
     const bayesianC = Math.round(5000 / Math.max(views, 50));
@@ -277,12 +273,10 @@ function calculateVirality(views, reactions, comments, postDateMs, channelMem = 
     // если ночь (tFactor=0.5) — velocity заниженная, делим и получаем «справедливую» цифру
     const adjVelocity = velocity / Math.max(temporalFactor, 0.1);
 
-    // ── Сигнал комментариев ───────────────────────────────────────────────────
     // Комментарий = более сильный сигнал чем просмотр, добавляем его отдельно
     // Нормализуем: много комментариев при малых просмотрах → высокий сигнал
     const commentSignal = Math.log1p(comments) / Math.log1p(Math.max(views / 100, 1));
 
-    // ── RVI ───────────────────────────────────────────────────────────────────
     let rvi;
     let velRatio = 1;
     if (channelMem && channelMem.post_count >= 5) {
@@ -304,17 +298,13 @@ function calculateVirality(views, reactions, comments, postDateMs, channelMem = 
         velRatio = Math.max(velRatio, momentumR / channelMem.avg_velocity);
     }
 
-    // ── Size ──────────────────────────────────────────────────────────────────
     const subs = parseSubs(rawSubs);
     const sizeM = sizeMultiplier(subs);
 
-    // ── Freshness ─────────────────────────────────────────────────────────────
     const fresh = freshnessFactor(postDateMs, velRatio);
 
-    // ── Reaction Diversity ────────────────────────────────────────────────────
     const divBonus = reactionDiversityBonus(reactionResults);
 
-    // ── Composite Final Score ─────────────────────────────────────────────────
     // CFS = RVI × sizeM × freshness × diversityBonus
     const cfs = rvi * sizeM * fresh * divBonus * 10_000;
 
@@ -329,7 +319,6 @@ function calculateVirality(views, reactions, comments, postDateMs, channelMem = 
     };
 }
 
-// ─── Adaptive Session Threshold ──────────────────────────────────────────────
 
 /**
  * Адаптивный порог публикации.
@@ -348,7 +337,6 @@ function adaptiveThreshold(allScores) {
     return mean * multiplier;
 }
 
-// ─── Nano-Viral Detection Engine (< 300 подп.) ──────────────────────────────
 //
 // NCVI: Reach Penetration — главная метрика.
 // views/subs > 1.0 → пост вышел за пределы аудитории → вирусный сигнал.
@@ -416,7 +404,6 @@ function calculateNanoVirality(views, reactions, comments, postDateMs, channelMe
     };
 }
 
-// ─── Micro-Viral Detection Engine v2 (300–999 подп.) ─────────────────────────
 //
 // MCVI v2: добавлен Reach Penetration к viewsRatio и erRatio.
 // Кубический корень из трёх аномалий → устойчивее к выбросам.
@@ -448,7 +435,6 @@ function calculateMicroVirality(views, reactions, comments, postDateMs, channelM
     const er = (reactions + comments * 1.5) / Math.max(views, 1);
     const velocity = views / (ageMin + 10);
 
-    // ── Аномалии ──────────────────────────────────────────────────────────
     const avgViews    = (channelMem && channelMem.avg_views    > 0) ? channelMem.avg_views    : views * 0.5;
     const avgER       = (channelMem && channelMem.avg_er       > 0) ? channelMem.avg_er       : 0.03;
     const avgVelocity = (channelMem && channelMem.avg_velocity > 0) ? channelMem.avg_velocity : 0.1;
@@ -488,7 +474,6 @@ function calculateMicroVirality(views, reactions, comments, postDateMs, channelM
     };
 }
 
-// ─── Small Channel Viral Index (1000–2999 подп.) ─────────────────────────────
 //
 // SCVI: гибрид CFS (абсолютный) + кластерный Z-score (относительный).
 // 60% абсолютный + 40% относительный.
@@ -536,7 +521,6 @@ function calculateSmallVirality(views, reactions, comments, postDateMs, channelM
     };
 }
 
-// ─── Medium Adapted CFS (3000–9999 подп.) ────────────────────────────────────
 //
 // Стандартный CFS с усиленным sizeMultiplier и кластерным Bayesian prior.
 
@@ -558,7 +542,6 @@ function adaptedMediumCFS(views, reactions, comments, postDateMs, channelMem = n
     return result;
 }
 
-// ─── Exports ─────────────────────────────────────────────────────────────────
 
 module.exports = {
     calculateVirality,

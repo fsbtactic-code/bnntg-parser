@@ -27,7 +27,6 @@ process.on('uncaughtException', (err) => {
     console.error('Uncaught Exception:', err);
 });
 
-// ─── Атомарный менеджер config.json (mutex против race condition) ────────────
 // Все записи в config.json проходят через updateConfig() — читаем свежий файл,
 // применяем функцию-мутатор, пишем обратно. Очередь гарантирует serialization.
 const CONFIG_FILE = './config.json';
@@ -48,7 +47,6 @@ function updateConfig(mutatorFn) {
 }
 
 
-// ─── Bot API helper ─────────────────────────────────────────────────────────
 const BOT_TOKEN  = process.env.BOT_TOKEN;
 const BOT_CHAT   = process.env.BOT_CHANNEL_ID; // -1003958213144
 
@@ -119,7 +117,6 @@ console.error = function(...args) {
 // Загружаем конфиг
 const config = JSON.parse(fs.readFileSync('./config.json', 'utf8'));
 
-// ── Entity Cache: channelId+accessHash → не вызываем ResolveUsername ──────────
 const ENTITY_CACHE_PATH = './entity_cache.json';
 let entityCache = {};
 try { if (fs.existsSync(ENTITY_CACHE_PATH)) entityCache = JSON.parse(fs.readFileSync(ENTITY_CACHE_PATH, 'utf8')); } catch(e) {}
@@ -244,7 +241,6 @@ async function checkMemeFormatViaHTTP(channelName) {
 async function start() {
     console.log("🚀 Запуск Smart Meme Parser...");
 
-    // ── Счётчик проходов (персистентный) ──
     const PASS_COUNTER_PATH = './pass_counter.json';
     const TOP_MEME_EVERY_N = 4; // самый копируемый — раз в 4 прохода (~2 часа)
 
@@ -343,10 +339,8 @@ async function processChannels(client, saveDiscoveredChannel, isTopMemePass = fa
     let processedCount = 0;
     let skippedCount = 0; // каналы без постов за окно
 
-    // ── Сброс кластерной статистики перед проходом ──────────────────────────
     clusters.resetPassStats();
 
-    // ── Статистика прохода ──────────────────────────────────────────────────
     const stats = {
         totalPostsViewed: 0,  // все просмотренные посты (до фильтра)
         totalPosts: 0,        // прошли фильтр (react≥min, views≥min)
@@ -387,7 +381,6 @@ async function processChannels(client, saveDiscoveredChannel, isTopMemePass = fa
             console.log(`📡 Парсинг канала: ${channel}... (${processedCount}/${currentConfig.targetChannels.length})`);
             // Загружаем память именно этого канала (или null для первого прохода)
             let channelMem = memory[channel] || null;
-            // ── Определяем кластер канала для адаптивных параметров ──
             const _chKeyPre = channel.toLowerCase().replace('@','');
             const _cachedPre = subsCache[_chKeyPre];
             const _subsPre = !_cachedPre ? 0 : (typeof _cachedPre === 'number' ? _cachedPre :
@@ -546,7 +539,6 @@ async function processChannels(client, saveDiscoveredChannel, isTopMemePass = fa
 
                 if (!msg.media || msg.fwdFrom || isRoundVideo) continue;
 
-                // ── Широкий сбор для хеширования (views>=100, react>=1) ──────
                 // Собираем ВСЕ уникальные медиа-посты — не только вирусные кандидаты.
                 // isAlreadyProcessed — быстрый O(1) SQLite PRIMARY KEY lookup.
                 {
@@ -571,14 +563,12 @@ async function processChannels(client, saveDiscoveredChannel, isTopMemePass = fa
 
                 stats.totalPostsViewed++;
 
-                // ── Обновляем временной профиль для ВСЕХ постов (и до фильтра) ──
                 {
                     const _ageMin = Math.max((Date.now() - msg.date * 1000) / 60000, 1);
                     const _vpMin  = views / (_ageMin + 10);
                     temporal.updateProfile(_vpMin, msg.date * 1000);
                 }
 
-                // ── Кластерные пороги (вместо двойного isMicro/isSmall) ──
                 const _chNameF = channel.toLowerCase().replace('@','');
                 const _cachedF = subsCache[_chNameF];
                 const _subsF = !_cachedF ? 0 : (typeof _cachedF === 'number' ? _cachedF :
@@ -613,7 +603,6 @@ async function processChannels(client, saveDiscoveredChannel, isTopMemePass = fa
                         // Временной поправочный коэффициент
                         const tFactor = temporal.getTemporalFactor(msg.date * 1000);
 
-                        // ── 5-кластерное скорирование ──
                         let scoredCFS = { cfs: 0, rvi: 0, freshness: 0, sizeM: 1.2, momentumR: 0, momentumV: 0 };
                         let scoredCluster = { ncvi: 0, mcvi: 0, scvi: 0, viewsRatio: 0, erRatio: 0, rpAnomaly: 0, erAnomaly: 0, clusterAnomaly: 0 };
                         let clusterScore = 0; // нормализованный скор для сравнения между кластерами
@@ -745,7 +734,6 @@ async function processChannels(client, saveDiscoveredChannel, isTopMemePass = fa
     // Сохраняем счётчик ошибок
     try { fs.writeFileSync(errPath, JSON.stringify(channelErrors)); } catch(_){}
 
-    // ── HTTP-дозапрос для каналов с «нет данных» ─────────────────────────────
     // После основного прохода проверяем каналы у которых нет данных о подписчиках
     // Используем HTTP (не TG API) чтобы не ловить FloodWait
     {
@@ -806,7 +794,6 @@ async function processChannels(client, saveDiscoveredChannel, isTopMemePass = fa
     // Тоже фильтруем уже пересланные — иначе они займут слоты micro/small/nano очередей
     const allMemesRaw = allMemes.filter(m => !isAlreadyForwarded(m.channel, m.id));
 
-    // ── Хеширование в ФОНЕ: запускаем без await — форвард начинается немедленно ────────
     ;(async () => {
         const HASH_SCAN_LIMIT = 600;
         const batchToHash = hashCandidates
@@ -875,7 +862,6 @@ async function processChannels(client, saveDiscoveredChannel, isTopMemePass = fa
         }
     }
 
-    // ── Проверяем flood ban state ────────────────────────────────────────────────
     const floodStatePath = './flood_state.json';
     let floodBanActive = false;
     if (fs.existsSync(floodStatePath)) {
@@ -903,7 +889,6 @@ async function processChannels(client, saveDiscoveredChannel, isTopMemePass = fa
     let forwardedMedium = 0;
 
     if (!floodBanActive) {
-    // ── 5-кластерное квотирование (жёсткий лимит) ──
     const TOTAL_BUDGET = config.maxMemesToForward || 50;
 
     // Пропорциональное распределение бюджета (минимум 1 на кластер, чтобы не терять хвосты)
@@ -979,7 +964,6 @@ async function processChannels(client, saveDiscoveredChannel, isTopMemePass = fa
         if (meme._slot === 'nano'     && forwardedNano     >= MAX_NANO)     continue;
 
         try {
-            // ── Быстрая дедупликация по channel+msgId (до скачивания медиа) ──
             if (isAlreadyForwarded(meme.channel, meme.id)) {
                 console.log(`⏭ Уже пересылали: @${meme.channel}/${meme.id} — пропуск`);
                 stats.dupFiltered++;
@@ -998,7 +982,6 @@ async function processChannels(client, saveDiscoveredChannel, isTopMemePass = fa
                 continue;
             }
 
-            // ── Архивная проверка: фильтр по возрасту картинки ────────────────────
             // Если config.archiveFilterDays > 0 — отсеиваем мемы старше N дней
             // (картинка уже циркулировала в рунете давно → не свежий контент)
             const archiveFilterDays = currentConfig.archiveFilterDays || 0;
@@ -1140,11 +1123,8 @@ async function processChannels(client, saveDiscoveredChannel, isTopMemePass = fa
 
     saveEntityCache();
 
-    // ── Авто-добавление мем-каналов из seenIn ────────────────────────────────
     // Функция fetchChannelInfoHTTP перемещена наверх для глобального использования
 
-    // ── Авто-добавление: 5+ репостов → мем-слово → GetHistory → добавляем всегда, meme_format если прошёл ──
-    // ── Auto-discover: 5+ reposts → mem-keyword → GetHistory → always add, meme_format if format passed ──
     try {
         const seenStats   = getSeenInStats();
         // Читаем свежий конфиг через updateConfig — один раз, потом применяем изменения атомарно
@@ -1183,7 +1163,6 @@ async function processChannels(client, saveDiscoveredChannel, isTopMemePass = fa
             const subs = scEntry ? (scEntry.subs > 0 ? scEntry.subs : parseRawSubs(scEntry.rawSubs)) : 0;
             if (subs < 1000 || subs > 20000) continue;
 
-            // ── Условие 1: мем-слово в username / title / description ─────────
             const chTitle    = entityEntry ? (entityEntry.title || '') : '';
             const chDesc     = scEntry ? (scEntry.desc || '') : '';
             const inUsername = /mem|мем/i.test(ch);
@@ -1195,7 +1174,6 @@ async function processChannels(client, saveDiscoveredChannel, isTopMemePass = fa
             const excludeRegex = /anime|animе|аниме|\bарт\b|\bарты\b|архитек/i;
             if (excludeRegex.test(chTitle) || excludeRegex.test(chDesc) || excludeRegex.test(ch)) continue;
 
-            // ── Условие 2: GetHistory → ≥85% одиночных медиа + <15% длинных текстов ──
             let checkPeer = null;
             // Защита от пустой строки '' (id из HTTP-фолбека не содержит реального ID)
             if (entityEntry && entityEntry.id && entityEntry.id.length > 0 &&
@@ -1328,7 +1306,6 @@ async function processChannels(client, saveDiscoveredChannel, isTopMemePass = fa
     console.log(`\n✅ Итерация завершена. Переслано: ${_fwdCount} мемов (Bridge: ${forwardedCount}, Mom: ${forwardedMomentum}, Med: ${forwardedMedium}, Small: ${forwardedSmall}, Micro: ${forwardedMicro}, Nano: ${forwardedNano}).`);
     console.log(`⏰ Следующий прогон через ~30 мин (в ${new Date(Date.now() + 30*60*1000).toLocaleTimeString('ru')})`);
 
-    // ── Итоговый отчёт в канал ───────────────────────────────────────────────
     const now = new Date();
     const mskTime = new Date(now.getTime() + 3*3600000 + now.getTimezoneOffset()*60000);
     const timeStr = mskTime.toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' });
@@ -1375,7 +1352,6 @@ async function processChannels(client, saveDiscoveredChannel, isTopMemePass = fa
                             silent: false, background: false, withMyScore: false,
                             dropAuthor: false, dropMediaCaptions: false, noforwards: false,
                         }));
-                        // ── Формируем отчёт о самом копируемом меме ─────────────────────────
                         const cleanCh = (ch) => String(ch || '').replace('@', '');
                         const totalSeen = (dupe.seenIn ? dupe.seenIn.length : 0);
                         // hitCount — количество новых совпадений за этот период (сброшен при выдаче)

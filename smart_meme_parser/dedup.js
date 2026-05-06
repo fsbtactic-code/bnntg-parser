@@ -17,7 +17,6 @@ const path     = require('path');
 const DB_PATH   = path.join(__dirname, 'memes.db');
 const JSON_PATH = path.join(__dirname, 'hashes.json');
 
-// ─── Init DB ─────────────────────────────────────────────────────────────────
 
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
@@ -57,13 +56,11 @@ db.exec(`
 // Миграция: добавляем grouped_id если ещё нет (для существующих БД)
 try { db.exec('ALTER TABLE media_copies ADD COLUMN grouped_id TEXT'); } catch(_) {}
 
-// ─── In-memory pHash cache (для быстрого Hamming search) ─────────────────────
 // Загружаем только hash + channel+msgId — минимум нужного в памяти
 let hashCache = db.prepare(
     'SELECT hash, first_channel, first_msg_id FROM media_hashes WHERE hash IS NOT NULL'
 ).all();
 
-// ─── Migration from JSON ──────────────────────────────────────────────────────
 
 (function migrateFromJSON() {
     if (!fs.existsSync(JSON_PATH)) return;
@@ -114,7 +111,6 @@ let hashCache = db.prepare(
     }
 })();
 
-// ─── pHash ───────────────────────────────────────────────────────────────────
 
 async function getPHash(buffer) {
     // Жёсткая защита: Jimp крашает с "Could not find MIME for Buffer <null>"
@@ -141,7 +137,6 @@ function hammingDistance(h1, h2) {
     return d;
 }
 
-// ─── Prepared statements ─────────────────────────────────────────────────────
 
 const stmtGetHash       = db.prepare('SELECT * FROM media_hashes WHERE hash = ?');
 const stmtIncrHit       = db.prepare('UPDATE media_hashes SET hit_count = hit_count + 1 WHERE hash = ?');
@@ -161,7 +156,6 @@ const stmtGetCopies     = db.prepare(`
     ORDER BY seen_ts
 `);
 
-// ─── Core API ────────────────────────────────────────────────────────────────
 
 /**
  * Проверяет, является ли картинка дублем.
