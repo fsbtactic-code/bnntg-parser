@@ -118,10 +118,10 @@ async function getPHash(buffer) {
         throw new Error('invalid buffer (null/empty/too small)');
     }
     const image = await Jimp.read(buffer);
-    image.resize(16, 16).grayscale();
+    image.resize(124, 124).grayscale();
     let total = 0;
     const pixels = [];
-    image.scan(0, 0, 16, 16, function(x, y, idx) {
+    image.scan(0, 0, 124, 124, function(x, y, idx) {
         const v = this.bitmap.data[idx];
         total += v;
         pixels.push(v);

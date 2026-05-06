@@ -805,7 +805,7 @@ async function processChannels(client, saveDiscoveredChannel, isTopMemePass = fa
             try {
                 const buf = await client.downloadMedia(cand.media, { thumb: 1 });
                 if (!buf || !Buffer.isBuffer(buf) || buf.length < 100) continue;
-                const dup = await isDuplicate(buf, cand.channel, cand.id, 10, cand.groupedId || null);
+                const dup = await isDuplicate(buf, cand.channel, cand.id, 600, cand.groupedId || null);
                 if (dup) hDupe++;
                 else { await saveToDatabase(buf, cand.id, cand.channel, cand.groupedId || null); hNew++; }
             } catch (_) {}
@@ -973,7 +973,7 @@ async function processChannels(client, saveDiscoveredChannel, isTopMemePass = fa
             const buffer = await client.downloadMedia(meme.media, { thumb: 1 });
             if (!buffer) continue; 
 
-            const isDupe = await isDuplicate(buffer, meme.channel, meme.id, 10, meme.groupedId || null);
+            const isDupe = await isDuplicate(buffer, meme.channel, meme.id, 600, meme.groupedId || null);
             if (isDupe) {
                 console.log(`♻️ БАЯН! @${meme.channel}/${meme.id} ← оригинал: @${isDupe.channelId}/${isDupe.messageId} (hitCount:${isDupe.hitCount})`);
                 // Фиксируем картинку в архиве даже если это баян — чтобы знать когда впервые встретилась
