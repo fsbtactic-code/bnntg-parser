@@ -372,7 +372,7 @@ async function processChannels(client, saveDiscoveredChannel, isTopMemePass = fa
     const MAX_POST_AGE_HOURS = 4;
     const baseTimeLimitMs = Date.now() - (currentConfig.hoursToCheck * 60 * 60 * 1000);
 
-    const batchSize = 3;
+    const batchSize = 5;
     for (let i = 0; i < currentConfig.targetChannels.length; i += batchSize) {
         const batch = currentConfig.targetChannels.slice(i, i + batchSize);
         await Promise.all(batch.map(async (channel) => {
@@ -729,11 +729,11 @@ async function processChannels(client, saveDiscoveredChannel, isTopMemePass = fa
         }
         
         // Маленькая пауза внутри батча (рандомизация)
-        await new Promise(r => setTimeout(r, 100 + Math.random() * 200));
+        await new Promise(r => setTimeout(r, 50 + Math.random() * 100));
         })); // Конец Promise.all
         
         // Пауза между батчами для безопасности от FloodWait
-        await new Promise(r => setTimeout(r, 1000));
+        await new Promise(r => setTimeout(r, 500));
     }
 
     // Сохраняем всю Channel Memory после прохода
